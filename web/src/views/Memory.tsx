@@ -15,8 +15,8 @@ const BLURB: Record<string, string> = {
   procedural: "How to build things — the agent stack, the order, the known traps.",
 };
 
-export default function Memory() {
-  const { data } = useApi<Mem>("memory");
+export default function Memory({ run }: { run?: string }) {
+  const { data } = useApi<Mem>("memory", run);
   const [filter, setFilter] = useState<string | null>(null);
   if (!data) return null;
 

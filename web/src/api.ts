@@ -3,8 +3,13 @@ import { useEffect, useState } from "react";
 
 const get = (path: string) => fetch(path).then((r) => r.json());
 
-export const useApi = <T,>(key: string) =>
-  useQuery<T>({ queryKey: [key], queryFn: () => get(`/api/${key}`) });
+// `run` scopes per-run reads to a selected run (omit for run-independent ones
+// like catalog/settings). It's part of the queryKey so switching runs refetches.
+export const useApi = <T,>(key: string, run?: string) =>
+  useQuery<T>({
+    queryKey: run ? [key, run] : [key],
+    queryFn: () => get(`/api/${key}${run ? `?run=${encodeURIComponent(run)}` : ""}`),
+  });
 
 export type TickerEvent = { key: string; text: string };
 

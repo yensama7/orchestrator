@@ -75,6 +75,8 @@ async def seed() -> None:
                    VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4::jsonb,$5,$6,$7,$8)""",
                 rid, T, name, fp, TMPL_UUID if tmpl else None, status, spent,
                 15.0 if i == 0 else spent * 1.4)
+        # the seeded storefront is the run the console opens on (§F current-run)
+        await c.execute("UPDATE runs SET is_current=true WHERE id=$1", RUN_UUID)
 
         prev = None
         for subj, choice, rationale, status in _SEMANTIC:

@@ -10,8 +10,8 @@ type Lin = {
   domains: string[];
 };
 
-export default function Lineage() {
-  const { data } = useApi<Lin>("lineage");
+export default function Lineage({ run }: { run?: string }) {
+  const { data } = useApi<Lin>("lineage", run);
   const [domain, setDomain] = useState("all domains");
   if (!data) return null;
 

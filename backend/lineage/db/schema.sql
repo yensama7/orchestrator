@@ -19,8 +19,13 @@ CREATE TABLE IF NOT EXISTS runs (
   status       text NOT NULL DEFAULT 'active',   -- active|passed|failed|abandoned
   spent_usd    numeric NOT NULL DEFAULT 0,
   ceiling_usd  numeric NOT NULL DEFAULT 0,
+  is_current   boolean NOT NULL DEFAULT false,   -- the run the console defaults to
   created_at   timestamptz NOT NULL DEFAULT now()
 );
+-- forward-only for older volumes; seed rows share a txn timestamp, so created_at
+-- can't pick "current" — an explicit flag does. At most one current run per tenant.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS is_current boolean NOT NULL DEFAULT false;
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_current ON runs (tenant_id) WHERE is_current;
 
 -- ── episodic: what happened, append-only (§5) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS episodic_events (

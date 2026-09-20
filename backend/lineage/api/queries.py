@@ -14,6 +14,11 @@ CYCLE = ["amber", "violet", "sage", "steel", "rust"]
 STATUS_COLOR = {"passed": "sage", "active": "amber", "failed": "rust", "abandoned": "rust"}
 
 
+def _short(run_id) -> str:
+    """Console label for a run: 'run/' + first 6 hex of its uuid."""
+    return "run/" + str(run_id).replace("-", "")[:6]
+
+
 def _fp_text(fp) -> str:
     d = json.loads(fp) if isinstance(fp, str) else (fp or {})
     return f"{d.get('domain','')} {d.get('subdomain','')} {' '.join(d.get('stack_hints',[]))}"
@@ -32,7 +37,7 @@ async def run_header(c, run_id) -> dict:
         "SELECT agent, cost_usd, tokens, cached_pct, state FROM agents ORDER BY ordinal")
     if r is None:  # no current run (empty db) — render an empty header, not a 500
         idle = sum(1 for a in agents if a["state"] == "idle")
-        return {"id": "—", "spec": "no active run", "template": "—", "spent": 0.0,
+        return {"id": "—", "label": "—", "spec": "no active run", "template": "—", "spent": 0.0,
                 "projected": 0.0, "ceiling": 0.0,
                 "rail": [{"label": "remaining", "usd": 0.0, "color": "ink3"}],
                 "cache_note": "no active run — start one from New run",
@@ -56,7 +61,7 @@ async def run_header(c, run_id) -> dict:
                   else "no model calls yet — add a model in Settings")
     idle = sum(1 for a in agents if a["state"] == "idle")
     return {
-        "id": "run/4f2a9c", "spec": r["name"], "template": r["tmpl"] or "—",
+        "id": str(run_id), "label": _short(run_id), "spec": r["name"], "template": r["tmpl"] or "—",
         "spent": round(spent, 2),
         "projected": round(min(ceiling, spent * 1.4) if spent else 0, 2),
         "ceiling": round(ceiling, 2), "rail": rail, "cache_note": cache_note,
@@ -244,7 +249,7 @@ async def workspace_view(c, run_id) -> dict:
                          "why": f"extension .{f['ext']} → tier 1 → grammar",
                          "lines": (f["content"] or "").count("\n"), "chars": len(f["content"] or ""),
                          "content": f["content"], "blame": blame or [], "held": f["held"]}
-    return {"worktree": "run/4f2a9c", "tree": tree, "open": open_file, "gate": gate,
+    return {"worktree": _short(run_id), "tree": tree, "open": open_file, "gate": gate,
             "empty": not files}
 
 

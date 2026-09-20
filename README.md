@@ -27,7 +27,9 @@ docker compose up --build
 | Contracts (Pydantic, `extra=forbid` injection defence) | ✅ §20.2 |
 | **Live orchestrator** — DAG walk, consensus arbitration, dissent, verify, leases | ✅ §17 M1+consensus |
 | Deterministic five-stage arbiter | ✅ real + self-checked, §18.3 |
-| Dissent ledger (record / resurrect / settle) | ✅ real, populated by real runs, §8 |
+| Dissent ledger (record / resurrect / settle, all over SQL) | ✅ real, populated by real runs, §8 |
+| Roles — user-defined, central agent researches skills/resources into prompts | ✅ real, `/api/roles` + Settings panel, §3 |
+| Multi-run — every New Run is a distinct run; switch/view any from the header | ✅ real, `is_current` + `?run=`, §16 |
 | Transports — API (metered), subscription (headless CLI), local (Ollama/echo) | ✅ §4, §20.3 |
 | Memory — embeddings, hybrid BM25+vector+RRF+rerank, supersede, distil | ✅ §20.7 |
 | Planning — extract / match / roster / plan (fingerprint → DAG) | ✅ §3 |
@@ -39,8 +41,9 @@ docker compose up --build
 ## Live demo
 
 1. **Settings** → add a model (pick any of the 10 providers; enter an API key,
-   or choose `local`/`subscription`) → **Add agent** (bind a role to the model).
-   Nothing is pre-populated — the roster is what you build.
+   or choose `local`/`subscription`) → optionally define a **Role** (the central
+   agent researches its skills/resources) → **Add agent** (bind a role to the
+   model). Nothing is pre-populated — the roster is what you build.
 2. **Workspace** → *Import folder* to load a real project (the compose gate lights
    up if it finds a compose file).
 3. **New run** → brief → *Extract fingerprint* → *Start run*.
@@ -72,8 +75,8 @@ Grep the deliberate stand-ins: `grep -rn "ponytail:" backend web`.
 ## Verify
 
 ```bash
-cd backend && python -m tests.test_core   # arbiter, dissent, run-gate, scheduler,
-                                          # embed, egress, taint, broker, scan, envelope
+cd backend && python -m tests.test_core   # arbiter, run-gate, scheduler, embed,
+                                          # egress, taint, broker, scan, envelope
 ```
 
 RLS isolation, live-run state changes, and hybrid retrieval are verified against
@@ -87,7 +90,7 @@ backend/lineage/
   transports/    base · api · subscription · local  (§4)
   planning/      extract · match · roster · plan     (§3)
   execution/     scheduler · leases · verify · pool · runner · orchestrator
-  arbitration/   arbiter · dissent · scores          (§8, §18.3)
+  arbitration/   arbiter · scores                    (§8, §18.3)
   memory/        embed · retrieval · store · supersede · distil  (§5, §20.7)
   security/      broker · taint · egress · scan       (§11)
   db/            schema.sql · tenancy · seed          (§18.4)

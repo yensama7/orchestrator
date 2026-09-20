@@ -12,6 +12,7 @@ type Settings = {
   credentials: { model: string; transport: string; enabled: boolean; has_key: boolean; key_hint: string }[];
   agents: { agent: string; role: string; model: string; transport: string; enabled: boolean }[];
 };
+type Role = { name: string; description: string; skills: string[]; resources: string[]; researched_at: string | null };
 
 type TestResult = { tested: boolean; working?: boolean; detail?: string };
 
@@ -25,10 +26,14 @@ export default function SettingsView() {
   const qc = useQueryClient();
   const { data: cat } = useApi<Catalog>("catalog");
   const { data: st } = useApi<Settings>("settings");
+  const { data: roles } = useApi<Role[]>("roles");
   const refresh = () => { qc.invalidateQueries({ queryKey: ["settings"] }); qc.invalidateQueries({ queryKey: ["agents"] }); };
+  const refreshRoles = () => qc.invalidateQueries({ queryKey: ["roles"] });
   if (!cat || !st) return null;
 
   const configured = new Set(st.credentials.map((c) => c.model));
+  // researched roles extend the built-in hints; agents can bind to either.
+  const roleNames = [...new Set([...cat.roles, ...(roles ?? []).map((r) => r.name)])];
 
   return (
     <div className="stack" style={{ maxWidth: 900, margin: "0 auto" }}>
@@ -63,10 +68,16 @@ export default function SettingsView() {
         ) : <p className="hint">No models configured. Add one above to enable agents.</p>}
       </Panel>
 
+      {/* ── roles ── */}
+      <Panel pad>
+        <PanelHeader title="Roles" help="Define a role and the central agent researches its skills + resources, which get injected into every node prompt that uses the role." />
+        <RolesPanel roles={roles ?? []} onChanged={refreshRoles} />
+      </Panel>
+
       {/* ── agents ── */}
       <Panel pad>
         <PanelHeader title="Agents" help="An agent is a role bound to a configured model. The orchestrator runs the roster you build here." />
-        <AddAgent roles={cat.roles} models={st.credentials} onAdded={refresh} />
+        <AddAgent roles={roleNames} models={st.credentials} onAdded={refresh} />
         {st.agents.length ? (
           <table className="data" style={{ marginTop: 10 }}>
             <thead><tr><th>Agent</th><th>Role</th><th>Model</th><th>Transport</th><th></th></tr></thead>
@@ -153,6 +164,42 @@ function ModelRow({ m, configured, onSaved }: {
         ) : <button className="btn" style={{ padding: "3px 10px" }} onClick={() => setOpen(true)}>Add</button>
       )}
     </div>
+  );
+}
+
+function RolesPanel({ roles, onChanged }: { roles: Role[]; onChanged: () => void }) {
+  const [name, setName] = useState("");
+  const [desc, setDesc] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input placeholder="role name (e.g. data-eng)" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 170 }} />
+        <input placeholder="description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
+        <button className="btn primary" disabled={!name.trim() || busy} style={{ padding: "4px 12px" }}
+          onClick={async () => {
+            setBusy(true);
+            await post("/api/roles", { name: name.trim(), description: desc.trim() });
+            setBusy(false); setName(""); setDesc(""); onChanged();
+          }}>{busy ? "Researching…" : "Research & add"}</button>
+      </div>
+      {roles.length ? (
+        <table className="data" style={{ marginTop: 10 }}>
+          <thead><tr><th>Role</th><th>Skills</th><th>Resources</th><th></th></tr></thead>
+          <tbody>
+            {roles.map((r) => (
+              <tr key={r.name}>
+                <td className="role">{r.name}</td>
+                <td className="dim">{r.skills.join(", ") || "—"}</td>
+                <td className="dim">{r.resources.join(", ") || "—"}</td>
+                <td><button className="btn ghost" style={{ padding: "2px 8px" }}
+                  onClick={async () => { await del(`/api/roles/${encodeURIComponent(r.name)}`); onChanged(); }}>Remove</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : <p className="hint" style={{ marginTop: 10 }}>No researched roles yet. Add one to inject skills into prompts.</p>}
+    </>
   );
 }
 

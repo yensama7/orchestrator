@@ -13,9 +13,10 @@ type Charts = {
 
 const STATE_COLOR: Record<string, string> = { running: "var(--sage)", waiting: "var(--amber)", idle: "var(--dimmer)" };
 
-export default function Agents() {
+export default function Agents({ run }: { run?: string }) {
+  // agents rows are the live global roster; charts' node/spend series are per-run.
   const { data } = useApi<Agent[]>("agents");
-  const { data: charts } = useApi<Charts>("charts");
+  const { data: charts } = useApi<Charts>("charts", run);
   if (!data) return null;
 
   if (!data.length) {

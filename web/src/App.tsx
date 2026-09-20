@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useApi, useStream } from "./api";
 import { COLOR } from "./components";
 import NewRun from "./views/NewRun";
@@ -10,11 +11,15 @@ import Workspace from "./views/Workspace";
 import SettingsView from "./views/Settings";
 
 type RunData = {
-  id: string; spec: string; template: string;
+  id: string; label: string; spec: string; template: string;
   spent: number; projected: number; ceiling: number;
   rail: { label: string; usd: number; color: string }[];
   cache_note: string;
   navfoot: { egress: string; agents: string; blocked: string };
+};
+type RunsList = {
+  current: string;
+  runs: { id: string; name: string; status: string; spent: number; current: boolean }[];
 };
 
 const VIEWS = [
@@ -28,14 +33,26 @@ const VIEWS = [
 ] as const;
 
 export default function App() {
+  const qc = useQueryClient();
   const [view, setView] = useState<string>("lineage");
-  const { data: run } = useApi<RunData>("run");
-  const { events, spent, stale } = useStream(run?.id ?? "run/4f2a9c");
+  // null = follow the server's current run; a uuid = view that specific run.
+  const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const { data: run } = useApi<RunData>("run", selectedRun ?? undefined);
+  const { data: runs } = useApi<RunsList>("runs");
+  const { events, spent, stale } = useStream(run?.id ?? "current");
   const liveSpent = spent ?? run?.spent ?? 0;
+
+  // after a New Run starts, that run becomes server-current — follow it and refresh.
+  const afterNewRun = () => {
+    setSelectedRun(null);
+    qc.invalidateQueries();
+    setView("lineage");
+  };
 
   return (
     <div className="shell">
-      <Header run={run} spent={liveSpent} stale={stale} onNewRun={() => setView("newrun")} />
+      <Header run={run} runs={runs} selectedRun={selectedRun} onSelectRun={setSelectedRun}
+              spent={liveSpent} stale={stale} onNewRun={() => setView("newrun")} />
 
       <nav className="nav">
         {VIEWS.map((v) => (
@@ -52,12 +69,12 @@ export default function App() {
       </nav>
 
       <main className={"stage" + (view === "workspace" ? " flush" : "")}>
-        {view === "newrun" && <NewRun onDone={() => setView("lineage")} />}
-        {view === "lineage" && <Lineage />}
-        {view === "memory" && <Memory />}
-        {view === "agents" && <Agents />}
-        {view === "dissent" && <Dissent />}
-        {view === "workspace" && <Workspace />}
+        {view === "newrun" && <NewRun onDone={afterNewRun} />}
+        {view === "lineage" && <Lineage run={run?.id} />}
+        {view === "memory" && <Memory run={run?.id} />}
+        {view === "agents" && <Agents run={run?.id} />}
+        {view === "dissent" && <Dissent run={run?.id} />}
+        {view === "workspace" && <Workspace run={run?.id} />}
         {view === "settings" && <SettingsView />}
       </main>
 
@@ -72,15 +89,27 @@ export default function App() {
   );
 }
 
-function Header({ run, spent, stale, onNewRun }: {
-  run?: RunData; spent: number; stale: boolean; onNewRun: () => void;
+function Header({ run, runs, selectedRun, onSelectRun, spent, stale, onNewRun }: {
+  run?: RunData; runs?: RunsList; selectedRun: string | null;
+  onSelectRun: (id: string | null) => void;
+  spent: number; stale: boolean; onNewRun: () => void;
 }) {
   const total = run ? run.rail.reduce((s, r) => s + r.usd, 0) : 1;
   return (
     <header className="header" style={stale ? { opacity: 0.6 } : undefined}>
       <div className="row1">
         <span className="wordmark">lineage<span className="tick">·</span>orchestrator</span>
-        <span className="runid">{run?.id}</span>
+        {runs && runs.runs.length > 0 ? (
+          <select className="runid" value={selectedRun ?? runs.current}
+            onChange={(e) => onSelectRun(e.target.value === runs.current ? null : e.target.value)}
+            title="Switch run">
+            {runs.runs.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name} · {r.status}{r.current ? " · current" : ""}
+              </option>
+            ))}
+          </select>
+        ) : <span className="runid">{run?.label}</span>}
         <span className="spec">
           {run?.spec} · inherited from <a href="#">{run?.template}</a>
         </span>

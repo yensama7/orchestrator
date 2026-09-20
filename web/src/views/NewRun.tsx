@@ -87,7 +87,9 @@ export default function NewRun({ onDone }: { onDone: () => void }) {
   const startRun = async () => {
     setBusy(true);
     try {
-      await postJson("/api/runs/run%2F4f2a9c/start", { fingerprint: normalizeFp(fp ?? {}), ceiling });
+      // `new` mints a fresh run server-side and makes it current (§F multi-run).
+      const name = String(fp?.subdomain || fp?.domain || "untitled run");
+      await postJson("/api/runs/new/start", { fingerprint: normalizeFp(fp ?? {}), ceiling, name });
     } finally { setBusy(false); }
     onDone();
   };

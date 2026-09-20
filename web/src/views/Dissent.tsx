@@ -14,8 +14,8 @@ const STATUS_COLOR: Record<string, string> = {
   dormant: "var(--dimmer)", resurrected: "var(--violet)", vindicated: "var(--sage)", refuted: "var(--rust)",
 };
 
-export default function Dissent() {
-  const { data } = useApi<Dis>("dissent");
+export default function Dissent({ run }: { run?: string }) {
+  const { data } = useApi<Dis>("dissent", run);
   const [filter, setFilter] = useState<string>("all");
   if (!data) return null;
   const rows = data.ledger.filter((r) => filter === "all" || r.status === filter);

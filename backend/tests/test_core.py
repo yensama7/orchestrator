@@ -2,7 +2,7 @@
 or `pytest`. These cover the DB-free logic; DB-backed paths are exercised by
 bringing the stack up (see README). No framework, no fixtures."""
 
-from lineage.arbitration import arbiter, dissent
+from lineage.arbitration import arbiter
 from lineage.contracts import Envelope, Intent
 from lineage.execution import runner, scheduler
 from lineage.memory import embed
@@ -12,7 +12,6 @@ from lineage.transports import api as api_transport
 
 
 def test_arbiter(): arbiter.demo()
-def test_dissent(): dissent.demo()
 def test_run_gate(): runner.demo()
 def test_scheduler(): scheduler.demo()
 def test_embed(): embed.demo()

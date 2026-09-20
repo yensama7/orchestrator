@@ -16,13 +16,21 @@ type Ws = {
           services?: { name: string; health: string }[] };
 };
 
-export default function Workspace() {
+export default function Workspace({ run }: { run?: string }) {
   const qc = useQueryClient();
-  const { data } = useApi<Ws>("workspace");
+  const { data } = useApi<Ws>("workspace", run);
+  const rq = run ? `?run=${encodeURIComponent(run)}` : "";
   const [selected, setSelected] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [runMsg, setRunMsg] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   if (!data) return null;
+
+  const runCompose = async () => {
+    setRunMsg("Starting…");
+    const r = await fetch(`/api/runs/${run ?? "current"}/run`, { method: "POST" }).then((x) => x.json());
+    setRunMsg(r.started ? `compose up · ${r.file}` : `can't run: ${r.reason}`);
+  };
 
   const importFolder = async (files: FileList) => {
     setImporting(true);
@@ -34,14 +42,14 @@ export default function Workspace() {
         paths.push((f as any).webkitRelativePath || f.name);
       });
       fd.append("paths", JSON.stringify(paths));
-      await fetch("/api/workspace/import", { method: "POST", body: fd });
+      await fetch(`/api/workspace/import${rq}`, { method: "POST", body: fd });
       setSelected(null);
       qc.invalidateQueries({ queryKey: ["workspace"] });
     } finally { setImporting(false); }
   };
 
   const clear = async () => {
-    await fetch("/api/workspace", { method: "DELETE" });
+    await fetch(`/api/workspace${rq}`, { method: "DELETE" });
     setSelected(null);
     qc.invalidateQueries({ queryKey: ["workspace"] });
   };
@@ -133,7 +141,8 @@ export default function Workspace() {
           {data.gate.ready ? (
             <>
               <span className="sage">{data.gate.file} ✓</span>
-              <button className="btn primary" style={{ padding: "4px 12px" }}>▶ Run</button>
+              <button className="btn primary" style={{ padding: "4px 12px" }} onClick={runCompose}>▶ Run</button>
+              {runMsg && <span className="meta" style={{ marginLeft: 8 }}>{runMsg}</span>}
               {data.gate.services?.map((s) => (
                 <span className="svc" key={s.name}>
                   <span className="dot" style={{ background: s.health === "up" ? "var(--sage)" : "var(--rust)" }} />{s.name}

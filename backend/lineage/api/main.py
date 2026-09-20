@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,7 @@ from ..contracts import SpecFingerprint
 from ..db import seed
 from ..db.tenancy import close, migrate, tenant_conn
 from ..execution import orchestrator
+from ..execution import runner as runner_mod
 from ..transports import Budget, Prompt, build as build_transport
 from ..planning import extract as extract_mod
 from ..planning import match as match_mod
@@ -26,7 +28,35 @@ from ..planning import research as research_mod
 from ..planning import roster as roster_mod
 from . import queries
 
-RUN = seed.RUN_UUID
+RUN = seed.RUN_UUID  # last-resort fallback when no run exists yet
+
+
+async def _current_run(c) -> UUID:
+    """The run the console defaults to: the one flagged is_current, else the most
+    recent, else the seed fallback (empty db)."""
+    cur = await c.fetchval("SELECT id FROM runs WHERE is_current LIMIT 1")
+    if cur:
+        return cur
+    cur = await c.fetchval("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1")
+    return cur or RUN
+
+
+async def _resolve(c, run: str | None) -> UUID:
+    """Which run a read/write targets: an explicit, existing ?run=<uuid>, else the
+    current run. Unknown/garbage ids fall through to current, never 500."""
+    if run:
+        try:
+            rid = UUID(run)
+        except ValueError:
+            rid = None
+        if rid and await c.fetchval("SELECT 1 FROM runs WHERE id=$1", rid):
+            return rid
+    return await _current_run(c)
+
+
+async def _make_current(c, run_id: UUID) -> None:
+    await c.execute("UPDATE runs SET is_current=false WHERE is_current")
+    await c.execute("UPDATE runs SET is_current=true WHERE id=$1", run_id)
 
 
 @asynccontextmanager
@@ -63,34 +93,49 @@ def health():
 
 
 # ── live reads ───────────────────────────────────────────────────────────────
-@app.get("/api/run")
-async def run():
+@app.get("/api/runs")
+async def list_runs():
     async with tenant_conn() as c:
-        return await queries.run_header(c, RUN)
+        rows = await c.fetch(
+            "SELECT id, name, status, spent_usd, is_current, created_at FROM runs "
+            "ORDER BY created_at DESC, name")
+        current = await _current_run(c)
+    return {
+        "current": str(current),
+        "runs": [{"id": str(r["id"]), "name": r["name"], "status": r["status"],
+                  "spent": round(float(r["spent_usd"]), 2),
+                  "current": r["id"] == current} for r in rows],
+    }
+
+
+@app.get("/api/run")
+async def run(run: str | None = None):
+    async with tenant_conn() as c:
+        return await queries.run_header(c, await _resolve(c, run))
 
 
 @app.get("/api/lineage")
-async def lineage():
+async def lineage(run: str | None = None):
     async with tenant_conn() as c:
-        return await queries.lineage_graph(c, RUN)
+        return await queries.lineage_graph(c, await _resolve(c, run))
 
 
 @app.get("/api/memory")
-async def memory():
+async def memory(run: str | None = None):
     async with tenant_conn() as c:
-        return await queries.memory_view(c, RUN)
+        return await queries.memory_view(c, await _resolve(c, run))
 
 
 @app.get("/api/charts")
-async def charts():
+async def charts(run: str | None = None):
     async with tenant_conn() as c:
-        return await queries.charts(c, RUN)
+        return await queries.charts(c, await _resolve(c, run))
 
 
 @app.get("/api/workspace")
-async def workspace():
+async def workspace(run: str | None = None):
     async with tenant_conn() as c:
-        return await queries.workspace_view(c, RUN)
+        return await queries.workspace_view(c, await _resolve(c, run))
 
 
 @app.get("/api/agents")
@@ -103,11 +148,12 @@ async def agents():
 
 
 @app.get("/api/dissent")
-async def dissent():
+async def dissent(run: str | None = None):
     async with tenant_conn() as c:
+        rid = await _resolve(c, run)
         rows = await c.fetch(
             """SELECT node_id AS node, dissenter, winner, stage, reason, status
-               FROM dissent ORDER BY created_at DESC, id DESC LIMIT 60""")
+               FROM dissent WHERE run_id=$1 ORDER BY created_at DESC, id DESC LIMIT 60""", rid)
         board = await c.fetch(
             """SELECT dissenter AS agent,
                       count(*) AS overruled,
@@ -300,9 +346,18 @@ async def del_role(name: str):
 
 # ── workspace import ────────────────────────────────────────────────────────
 @app.post("/api/workspace/import")
-async def import_folder(files: list[UploadFile], paths: str = Form("[]")):
+async def import_folder(files: list[UploadFile], paths: str = Form("[]"), run: str | None = None):
     rel = json.loads(paths)
     async with tenant_conn() as c:
+        RUN = await _resolve(c, run)
+        if not await c.fetchval("SELECT 1 FROM runs WHERE id=$1", RUN):
+            # import-first flow (no run yet): attach files to a fresh draft run
+            RUN = uuid4()
+            await c.execute(
+                """INSERT INTO runs (id, tenant_id, name, fingerprint, status, ceiling_usd)
+                   VALUES ($1, current_setting('app.tenant_id')::uuid, 'imported worktree', '{}'::jsonb, 'active', 15)""",
+                RUN)
+            await _make_current(c, RUN)
         n = await c.fetchval("SELECT count(*) FROM worktree_files WHERE run_id=$1", RUN)
         first_open_set = await c.fetchval(
             "SELECT count(*) FROM worktree_files WHERE run_id=$1 AND is_open", RUN)
@@ -333,9 +388,9 @@ async def import_folder(files: list[UploadFile], paths: str = Form("[]")):
 
 
 @app.delete("/api/workspace")
-async def clear_workspace():
+async def clear_workspace(run: str | None = None):
     async with tenant_conn() as c:
-        await c.execute("DELETE FROM worktree_files WHERE run_id=$1", RUN)
+        await c.execute("DELETE FROM worktree_files WHERE run_id=$1", await _resolve(c, run))
     return {"ok": True}
 
 
@@ -378,28 +433,73 @@ class StartIn(BaseModel):
 
 @app.post("/api/runs/{run_id:path}/start")
 async def start(run_id: str, body: StartIn | None = None):
+    """Start a run. `new` (what the wizard posts) mints a fresh run and makes it
+    current, so every New Run is a distinct, addressable run in the history — not
+    a reused UUID. Re-starting an existing run id re-runs that one."""
+    fp = json.dumps((body.fingerprint if body else None) or {"domain": "other"})
+    name = (body.name if body else None) or "untitled run"
+    ceiling = body.ceiling if body else 15.0
     async with tenant_conn() as c:
-        exists = await c.fetchval("SELECT 1 FROM runs WHERE id=$1", RUN)
-        if not exists:  # create the current run on demand (works from an empty db)
-            fp = json.dumps((body.fingerprint if body else None) or {"domain": "other"})
+        try:
+            existing = UUID(run_id)
+        except ValueError:
+            existing = None
+        rid = existing if existing and await c.fetchval(
+            "SELECT 1 FROM runs WHERE id=$1", existing) else None
+        if rid is None:  # `new` / unknown id → create a fresh run
+            rid = uuid4()
             await c.execute(
                 """INSERT INTO runs (id, tenant_id, name, fingerprint, status, spent_usd, ceiling_usd)
                    VALUES ($1, current_setting('app.tenant_id')::uuid, $2, $3::jsonb, 'active', 0, $4)""",
-                RUN, (body.name if body else None) or "untitled run", fp,
-                (body.ceiling if body else 15.0))
-    ok = await orchestrator.start(RUN)
-    return {"started": ok, "run": str(RUN)}
+                rid, name, fp, ceiling)
+        await _make_current(c, rid)
+    ok = await orchestrator.start(rid)
+    return {"started": ok, "run": str(rid)}
+
+
+@app.post("/api/runs/{run_id:path}/run")
+async def run_compose(run_id: str):
+    """§7 Run gate: materialise the imported worktree (stored in the DB) to a temp
+    dir, gate it (compose required), and `docker compose up` if ready. This is what
+    wires runner.py into the live path — previously it had no caller."""
+    async with tenant_conn() as c:
+        rid = await _resolve(c, run_id)
+        files = await c.fetch(
+            "SELECT folder, name, content FROM worktree_files WHERE run_id=$1 ORDER BY ordinal", rid)
+    if not files:
+        return {"started": False, "reason": "empty_worktree"}
+    import tempfile
+    from pathlib import Path
+    wt = Path(tempfile.mkdtemp(prefix="lineage-run-"))
+    for f in files:
+        rel = (f["folder"] + f["name"]).replace("\\", "/").lstrip("./")
+        if ".." in rel.split("/"):
+            continue  # never let an imported path escape the temp worktree
+        dest = wt / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f["content"] or "", encoding="utf-8")
+    g = runner_mod.gate(wt)
+    if not g.ready:
+        return {"started": False, "reason": g.reason,
+                "offer": {"label": g.offer.label, "task": g.offer.task}}
+    try:
+        await runner_mod.start(wt, g)
+    except FileNotFoundError:
+        return {"started": False, "reason": "docker_missing", "worktree": str(wt)}
+    return {"started": True, "file": g.file, "worktree": str(wt)}
 
 
 @app.get("/api/runs/{run_id:path}/stream")
 async def stream(run_id: str):
+    async with tenant_conn() as c:
+        rid = await _resolve(c, run_id)
     async def gen():
-        last = max(0, await _max_event_id() - 8)
+        last = max(0, await _max_event_id(rid) - 8)
         while True:
             async with tenant_conn() as c:
                 rows = await c.fetch(
                     "SELECT id, kind, payload FROM episodic_events WHERE run_id=$1 AND id>$2 "
-                    "ORDER BY id LIMIT 50", RUN, last)
+                    "ORDER BY id LIMIT 50", rid, last)
             for r in rows:
                 last = r["id"]
                 payload = json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"]
@@ -415,10 +515,10 @@ async def stream(run_id: str):
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-async def _max_event_id() -> int:
+async def _max_event_id(run_id) -> int:
     async with tenant_conn() as c:
         return int(await c.fetchval(
-            "SELECT COALESCE(max(id),0) FROM episodic_events WHERE run_id=$1", RUN) or 0)
+            "SELECT COALESCE(max(id),0) FROM episodic_events WHERE run_id=$1", run_id) or 0)
 
 
 def _agent_display(r) -> dict:

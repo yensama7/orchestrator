@@ -86,14 +86,19 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster) -> None:
         return
     try:
         proposals, per_agent = await _propose(run_id, node, fp, agents)
+        # §18.3 stage 2: verify every proposal *before* arbitration so a passing
+        # test can beat a vote. Verifiers are pure and cheap (verify.py), so running
+        # them on all proposals is safe; the winner's result is reused as its status.
+        vres = {p.id: await verify.run(node.acceptance, p.body) for p in proposals}
+        for p in proposals:
+            p.verifier_passes = vres[p.id].passed
         decision = arb.decide(fp.domain, proposals)
         if decision.held:
             await mem.append_episodic(run_id, "ticker", {"key": "held", "text": f"{node.id} — arbiter tie"})
         await _record_dissent(run_id, node.id, proposals, decision)
 
         winner = next((p for p in proposals if p.id == decision.winner), proposals[0])
-        vres = await verify.run(node.acceptance, winner.body)
-        status = "passed" if vres.passed else "failed"
+        status = "passed" if vres[winner.id].passed else "failed"
         winner_agent, winner_body = winner.agent, winner.body
 
         # commit per-agent usage (tokens/cost/pass) — this is what fills the charts.
@@ -130,8 +135,10 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster) -> None:
 
 def _pick(roster: dict, node: NodeSpec) -> list[dict]:
     same = roster.get(node.role, [])
-    if node.irreversible and node.role == "senior-dev" and len(same) > 1:
-        return same                      # consensus over all senior-devs
+    # consensus on any irreversible node where >1 agent shares the role — not just
+    # the literal "senior-dev", so a user's own role names get consensus too.
+    if node.irreversible and len(same) > 1:
+        return same
     if same:
         return [same[0]]
     flat = [a for lst in roster.values() for a in lst]
@@ -310,7 +317,7 @@ async def _resurrect_and_settle(run_id, node: NodeSpec):
     """§8: the winner failed → walk the dormant dissents for this node, highest
     stage first, re-verifying each stored proposal. First one that passes is
     vindicated and returned as the effective (agent, body); the rest that get
-    tried and fail are refuted. Mirrors DissentLedger.resurrect/settle over SQL."""
+    tried and fail are refuted. This is the resurrect/settle loop (§8) over SQL."""
     async with tenant_conn() as c:
         rows = await c.fetch(
             """SELECT id, dissenter, proposal FROM dissent

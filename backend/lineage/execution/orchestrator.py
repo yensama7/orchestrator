@@ -18,12 +18,19 @@ from ..arbitration.scores import AgentScore, Proposal
 from ..contracts import NodeSpec, SpecFingerprint
 from ..db.tenancy import tenant_conn
 from ..memory import store as mem
+from ..memory.embed import embed
+from ..memory.retrieval import retrieve
 from ..planning.plan import build_dag
 from ..transports import Prompt, build as build_transport
 from ..transports.base import Completion
 from . import leases, scheduler, verify
 
 _running: set[str] = set()
+# workspace chunks per run, embedded once at run start (files are static during a
+# run). Per node we send only the chunks matching that node — not the whole tree —
+# so token cost scales with relevance, not workspace size.
+# ponytail: module dict instead of threading run_id through every signature.
+_ws_ctx: dict[str, dict] = {}
 
 
 async def start(run_id: UUID) -> bool:
@@ -37,6 +44,7 @@ async def start(run_id: UUID) -> bool:
 async def _run(run_id: UUID) -> None:
     try:
         fp, ceiling = await _load(run_id)
+        _ws_ctx[str(run_id)] = await _worktree_chunks(run_id)
         roster = await _roster()
         if not roster:
             await mem.append_episodic(run_id, "ticker",
@@ -56,6 +64,7 @@ async def _run(run_id: UUID) -> None:
     except Exception as e:
         await mem.append_episodic(run_id, "ticker", {"key": "failed", "text": str(e)[:90]})
     finally:
+        _ws_ctx.pop(str(run_id), None)
         _running.discard(str(run_id))
 
 
@@ -85,10 +94,13 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster) -> None:
                               passed=(a["agent"] == winner.agent and status == "passed"))
         await _charge(run_id, sum(u["cost"] for u in per_agent.values()))
 
-        if node.id in ("schema.design", "auth.session", "payments.webhook"):
-            await mem.write_semantic(run_id, node.id.split(".")[0],
-                                     f"{node.id.split('.')[0]} = {winner.body.get('choice')}",
-                                     decided_by=winner.agent)
+        # record every passed decision, not a hardcoded three — this is what
+        # retrieve() feeds back into later prompts, so the memory has to be real.
+        choice = winner.body.get("choice")
+        if status == "passed" and choice:
+            subject = node.id.split(".")[0]
+            await mem.write_semantic(run_id, subject, f"{subject} = {choice}",
+                                     rationale=node.intent, decided_by=winner.agent)
         await mem.append_episodic(run_id, "node", {
             "node": node.id, "winner": winner.agent, "status": status,
             "stage": decision.stage, "text": f"{node.id} · {winner.agent} · {status}"})
@@ -112,7 +124,7 @@ async def _propose(run_id, node, fp, agents) -> tuple[list[Proposal], dict]:
     per_agent: dict[str, dict] = {}
     for i, a in enumerate(agents):
         await _set_state([a["agent"]], "running")
-        comp = await _dispatch(a, node, fp)
+        comp = await _dispatch(a, node, fp, run_id)
         per_agent[a["agent"]] = {
             "tokens": comp.usage.input_tokens + comp.usage.output_tokens,
             "cost": comp.usage.usd,
@@ -124,17 +136,89 @@ async def _propose(run_id, node, fp, agents) -> tuple[list[Proposal], dict]:
     return proposals, per_agent
 
 
-async def _dispatch(a: dict, node: NodeSpec, fp: SpecFingerprint) -> Completion:
+async def _dispatch(a: dict, node: NodeSpec, fp: SpecFingerprint, run_id) -> Completion:
     profile = await _role_profile(node.role)
     must_not = f"MUST NOT: {', '.join(node.constraints)}" if node.constraints else ""
+    query = f"{node.role} {node.intent}"
+    qvec = await embed(query)
+    prior = await _prior_decisions(query)
+    chunks = _relevant_workspace(str(run_id), qvec)
     prompt = Prompt(
-        stable=f"role={node.role} domain={fp.domain}",
-        system="\n".join(x for x in (profile, must_not) if x),
+        # cacheable prefix: identical for every node/agent in the run (domain +
+        # file tree), so the provider serves it from cache after the first call.
+        stable=_ws_stable(str(run_id), fp.domain),
+        # variable tail: role, constraints, retrieved memory, and the chunks that
+        # match *this* node — the only part that changes call to call.
+        system="\n".join(x for x in (f"role={node.role}", profile, must_not, prior, chunks) if x),
         user=f"node {node.id}: {node.intent} for {fp.subdomain or fp.domain}")
     try:
         return await build_transport(a["model"], a["transport"], a.get("key")).complete(prompt)
     except Exception:
         return await build_transport(a["model"], "local").complete(prompt)  # keyless fallback
+
+
+async def _prior_decisions(query: str) -> str:
+    """Feed the run's own memory back in: retrieved active decisions become a
+    'do not contradict' block. This closes the write→retrieve loop (retrieve()
+    was defined but never called), so memory is used, not just recorded."""
+    try:
+        hits = await retrieve(query, top_k=4)
+    except Exception:
+        return ""  # retrieval is advisory — never block a node on it
+    lines = [h["choice"] for h in hits if h.get("choice")]
+    return "PRIOR DECISIONS (do not contradict):\n" + "\n".join(f"- {x}" for x in lines) if lines else ""
+
+
+_CHUNK = 1200  # chars per chunk — one embed unit
+
+
+async def _worktree_chunks(run_id) -> dict:
+    """Split imported files into embedded chunks once per run. Embedding is local
+    and free by default (embed.py), so this costs nothing at the paid model — it's
+    what lets each node pull only the chunks it needs."""
+    async with tenant_conn() as c:
+        files = await c.fetch(
+            "SELECT folder, name, content FROM worktree_files WHERE run_id=$1 ORDER BY ordinal", run_id)
+    if not files:
+        return {}
+    names = [f"{f['folder']}{f['name']}" for f in files]
+    tree = "\n".join("  " + n for n in names[:60])
+    if len(names) > 60:
+        tree += f"\n  … +{len(names) - 60} more"
+    chunks = []
+    for f in files:
+        body = f["content"] or ""
+        label = f"{f['folder']}{f['name']}"
+        for i in range(0, len(body), _CHUNK):
+            piece = body[i:i + _CHUNK]
+            if piece.strip():
+                chunks.append({"label": label, "text": piece, "vec": await embed(f"{label}\n{piece}")})
+    return {"header": f"WORKSPACE — {len(files)} files:\n{tree}", "chunks": chunks}
+
+
+def _ws_stable(run_id: str, domain: str) -> str:
+    """Run-constant cacheable prefix: domain + the file tree. Same bytes for every
+    node/agent, so it lives in Prompt.stable and gets served from cache."""
+    ctx = _ws_ctx.get(run_id) or {}
+    return "\n".join(x for x in (f"domain={domain}", ctx.get("header")) if x)
+
+
+def _relevant_workspace(run_id: str, qvec, k: int = 6, budget: int = 6000) -> str:
+    """Rank chunks by cosine to the node query; send only the top few under a char
+    budget. Tree lives in the stable prefix (_ws_stable), so this is chunks only."""
+    ctx = _ws_ctx.get(run_id) or {}
+    chunks = ctx.get("chunks") or []
+    if not chunks:
+        return ""
+    scored = sorted(chunks, key=lambda ch: sum(a * b for a, b in zip(ch["vec"], qvec)), reverse=True)
+    parts, used = [], 0
+    for ch in scored[:k]:
+        block = f"\n--- {ch['label']} ---\n{ch['text']}"
+        if used + len(block) > budget:
+            break
+        parts.append(block)
+        used += len(block)
+    return "".join(parts)
 
 
 async def _role_profile(role: str) -> str:

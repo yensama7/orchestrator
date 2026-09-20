@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useApi } from "../api";
-import { Chip, EmptyState, Panel, PanelHeader, Pt, Row, Scatter } from "../components";
+import { Chip, EmptyState, Legend, Panel, PanelHeader, Pt, Row, Scatter, spread } from "../components";
 
 type Lin = {
   points: (Pt & { kind: string })[];
@@ -16,15 +16,26 @@ export default function Lineage() {
   if (!data) return null;
 
   // filtered-out run nodes render dimmed as context (not hittable); templates always shown.
-  const points: Pt[] = data.points.map((p) => ({
+  // spread() fans out stacked points so the graph stays legible as runs accumulate.
+  const points: Pt[] = spread(data.points.map((p) => ({
     ...p,
     dimmed: p.kind === "run" && domain !== "all domains" && p.domain !== domain,
-  }));
+  })));
+  const runCount = data.points.filter((p) => p.kind === "run").length;
 
   return (
     <div className="grid-2">
       {data.points.length ? (
-        <Scatter points={points} edges={data.edges} />
+        <div className="stack" style={{ gap: 8 }}>
+          <Scatter points={points} edges={data.edges} />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <Legend items={[
+              { color: "sage", label: "passed" }, { color: "amber", label: "active" },
+              { color: "rust", label: "failed" }, { color: "violet", label: "template" },
+            ]} />
+            <span className="hint">{runCount} run{runCount === 1 ? "" : "s"}</span>
+          </div>
+        </div>
       ) : (
         <Panel pad><EmptyState message="No runs yet. Start one from New run to populate the lineage graph." /></Panel>
       )}

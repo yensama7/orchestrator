@@ -45,6 +45,18 @@ def _base_url(model: str) -> str:
     return _BASES.get(info["provider"] if info else "", "https://api.openai.com/v1")
 
 
+def _anthropic_system(prompt: Prompt):
+    """System as content blocks with a cache breakpoint after the stable prefix,
+    so the run-constant tree is billed once (cache write) then read at 0.1×. No
+    stable block → plain string (nothing worth a breakpoint)."""
+    if not prompt.stable.strip():
+        return prompt.system.strip()
+    blocks = [{"type": "text", "text": prompt.stable, "cache_control": {"type": "ephemeral"}}]
+    if prompt.system.strip():
+        blocks.append({"type": "text", "text": prompt.system})
+    return blocks
+
+
 class ApiTransport(Transport):
     def __init__(self, model: str, concurrency: int = 8, api_key: str | None = None):
         self.name = "api"
@@ -65,22 +77,29 @@ class ApiTransport(Transport):
             raise RuntimeError(f"{self.model}: no API key set ({env_var}) — this agent is API-only (§4)")
 
         async with httpx.AsyncClient(timeout=120) as c:
+            pin, pout = PRICES.get(self.model, (1.0, 3.0))
             if anthropic:
                 r = await c.post("https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
                     json={"model": self.model, "max_tokens": 1024,
-                          "system": f"{prompt.stable}\n{prompt.system}".strip(),
+                          "system": _anthropic_system(prompt),
                           "messages": [{"role": "user", "content": prompt.user}]})
                 r.raise_for_status()
                 d = r.json()
                 text = "".join(b.get("text", "") for b in d.get("content", []))
                 u = d.get("usage", {})
-                inp, out = u.get("input_tokens", 0), u.get("output_tokens", 0)
+                # Anthropic splits input: uncached + cache write (1.25×) + cache read (0.1×)
+                fresh, out = u.get("input_tokens", 0), u.get("output_tokens", 0)
+                cw, cr = u.get("cache_creation_input_tokens", 0), u.get("cache_read_input_tokens", 0)
+                inp = fresh + cw + cr
+                usd = (fresh * pin + cw * pin * 1.25 + cr * pin * 0.1) / 1e6 + out / 1e6 * pout
+                cached = cr
             else:
                 base = _base_url(self.model)
                 r = await c.post(f"{base}/chat/completions",
                     headers={"Authorization": f"Bearer {key}"},
                     json={"model": self.model, "messages": [
+                        # stable first so the provider's automatic prefix cache hits
                         {"role": "system", "content": f"{prompt.stable}\n{prompt.system}".strip()},
                         {"role": "user", "content": prompt.user}]})
                 r.raise_for_status()
@@ -88,10 +107,13 @@ class ApiTransport(Transport):
                 text = d["choices"][0]["message"]["content"]
                 u = d.get("usage", {})
                 inp, out = u.get("prompt_tokens", 0), u.get("completion_tokens", 0)
+                cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                # ponytail: cost at full input rate; cached-token discount varies by
+                # provider (OpenAI 0.5×, others differ) — report hits, don't guess price.
+                usd = inp / 1e6 * pin + out / 1e6 * pout
 
-        pin, pout = PRICES.get(self.model, (1.0, 3.0))
-        usd = inp / 1e6 * pin + out / 1e6 * pout
-        return Completion(text, Usage(input_tokens=inp, output_tokens=out, usd=usd), raw=d)
+        return Completion(text, Usage(input_tokens=inp, output_tokens=out,
+                                      cached_tokens=cached, usd=usd), raw=d)
 
     def capacity(self) -> Capacity:
         return Capacity(limit=self._concurrency, unit="requests")

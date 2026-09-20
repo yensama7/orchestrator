@@ -128,8 +128,32 @@ async def dissent():
 
 # ── settings: catalog, credentials, agents ──────────────────────────────────
 @app.get("/api/catalog")
-def get_catalog():
-    return {"providers": catalog.CATALOG, "roles": catalog.ROLE_HINTS}
+async def get_catalog():
+    # merge models actually installed on the local Ollama server so any local
+    # model present in the system can be added — not just the hardcoded few.
+    providers = [dict(p) for p in catalog.CATALOG]
+    installed = await _discover_local_models()
+    if installed:
+        prov = next(p for p in providers if p["provider"].startswith("Local"))
+        known = {m["id"] for m in prov["models"]}
+        prov["models"] = prov["models"] + [
+            {"id": m, "label": f"{m} (installed)", "transports": ["local"]}
+            for m in installed if m not in known]
+    return {"providers": providers, "roles": catalog.ROLE_HINTS}
+
+
+async def _discover_local_models() -> list[str]:
+    from ..transports.local import _OLLAMA
+    if not _OLLAMA:
+        return []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{_OLLAMA}/api/tags")
+            r.raise_for_status()
+            return [m["name"] for m in r.json().get("models", [])]
+    except Exception:
+        return []  # server down/unreachable → just the catalog defaults
 
 
 @app.get("/api/settings")

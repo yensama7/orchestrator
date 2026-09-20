@@ -30,12 +30,44 @@ _SYS = (
     "to commerce. Empty/unknown fields: use the type's empty value."
 )
 
+# canonical domain set (join key for roster/agent_scores/lineage grouping) and the
+# synonyms a free-thinking model tends to emit. The prompt is unconstrained — the
+# model reasons however it likes; we only normalise the *label* so "e-commerce",
+# "web shop", "Commerce" all collapse to one bucket. Unknown → "other".
+_CANON = {"commerce", "saas", "api", "mobile", "content", "tool", "data", "other"}
+_SYN = {
+    "ecommerce": "commerce", "e-commerce": "commerce", "retail": "commerce",
+    "shop": "commerce", "store": "commerce", "storefront": "commerce",
+    "marketplace": "commerce", "fintech": "commerce", "payment": "commerce",
+    "b2b": "saas", "dashboard": "saas", "admin": "saas", "platform": "saas",
+    "service": "api", "backend": "api", "microservice": "api", "rest": "api",
+    "app": "mobile", "ios": "mobile", "android": "mobile",
+    "cms": "content", "blog": "content", "media": "content", "publishing": "content",
+    "news": "content", "website": "content", "web": "content",
+    "utility": "tool", "devtool": "tool", "productivity": "tool",
+    "analytics": "data", "etl": "data", "ml": "data", "pipeline": "data",
+    "warehouse": "data", "dataset": "data",
+}
+
+
+def canon_domain(d: str) -> str:
+    d = (d or "").strip().lower()
+    if d in _CANON:
+        return d
+    if d in _SYN:
+        return _SYN[d]
+    for kw, canon in _SYN.items():  # substring: "e-commerce storefront" → commerce
+        if kw in d:
+            return canon
+    return "other"
+
 
 async def extract(brief: str) -> SpecFingerprint:
     try:
         comp = await (await light_transport()).complete(
             Prompt(system=_SYS, user=brief))
         data = json.loads(_json_slice(comp.text))
+        data["domain"] = canon_domain(data.get("domain", ""))  # free reasoning, fixed label
         return SpecFingerprint(**data)
     except Exception:
         return _heuristic(brief)  # CLI missing/unauthed or bad JSON → keyword fallback
@@ -77,6 +109,12 @@ def demo() -> None:
     fp2 = _heuristic("Nigerian storefront with 2k skus and paystack")
     assert fp2.domain == "commerce" and fp2.payments == "paystack" and fp2.region == "NG", fp2
     assert _json_slice("noise {\"a\":1} tail") == '{"a":1}'
+    # a free-thinking model's varied labels collapse to the canonical join key
+    assert canon_domain("E-Commerce") == "commerce"
+    assert canon_domain("web shop") == "commerce"
+    assert canon_domain("analytics") == "data"
+    assert canon_domain("wildly novel thing") == "other"
+    assert canon_domain("saas") == "saas"
 
     # a model that answers is honored — extraction must NOT override it with the
     # keyword heuristic (this is the "always commerce" regression guard).

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useApi } from "../api";
-import { EmptyState, HEX, Panel, PanelHeader, Pt, Row, Scatter } from "../components";
+import { EmptyState, HEX, Panel, PanelHeader, Pt, Row, Scatter, spread } from "../components";
 
 type Mem = {
   tiers: { key: string; n: number; color: string; lines: string[] }[];
@@ -21,9 +21,9 @@ export default function Memory() {
   if (!data) return null;
 
   // semantic points coloured by status; subject filter dims the rest.
-  const points: Pt[] = data.points.map((p) => ({
+  const points: Pt[] = spread(data.points.map((p) => ({
     ...p, dimmed: !!filter && p.meta?.subject !== filter,
-  }));
+  })));
 
   return (
     <div className="stack">

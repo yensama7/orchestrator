@@ -4,9 +4,11 @@ blobs. Each function takes an open tenant-scoped connection."""
 from __future__ import annotations
 
 import json
+import os
 
 from ..memory.embed import embed
 from ..memory.projection import project
+from ..memory.retrieval import TOP_K
 
 CYCLE = ["amber", "violet", "sage", "steel", "rust"]
 STATUS_COLOR = {"passed": "sage", "active": "amber", "failed": "rust", "abandoned": "rust"}
@@ -166,11 +168,12 @@ async def memory_view(c, run_id) -> dict:
             {"label": "Superseded", "n": sup, "color": "rust"},
             {"label": "Episodic events", "n": int(ep), "color": "steel"},
         ],
+        # real config/state, not benchmark blobs — honest about what's running now
         "quality": [
-            {"label": "Hybrid recall@10", "n": "0.91"},
-            {"label": "Vector only", "n": "0.68"},
-            {"label": "Rerank", "n": "bge-v2-m3"},
-            {"label": "Top-k per prompt", "n": "6"},
+            {"label": "Retrievable rows", "n": str(sem)},
+            {"label": "Top-k per prompt", "n": str(TOP_K)},
+            {"label": "Embedder", "n": "BGE-M3 (TEI)" if os.getenv("EMBED_URL") else "local hash"},
+            {"label": "Reranker", "n": "lexical + RRF"},
         ],
         "points": points,
     }

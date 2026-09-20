@@ -51,6 +51,38 @@ export type Pt = {
   meta?: { status?: string; cost?: number; subject?: string };
 };
 
+// Deterministic fan-out: the hash embedder collapses similar fingerprints to
+// near-identical coords, so points stack as runs accumulate. Group by cell and
+// spread duplicates on a ring — keeps the graph readable at any node count.
+const clamp = (v: number) => Math.max(0.02, Math.min(0.98, v));
+export function spread(points: Pt[]): Pt[] {
+  const buckets = new Map<string, Pt[]>();
+  for (const p of points) {
+    const k = `${Math.round(p.x * 80)},${Math.round(p.y * 80)}`;
+    (buckets.get(k) ?? buckets.set(k, []).get(k)!).push(p);
+  }
+  const out: Pt[] = [];
+  for (const g of buckets.values()) {
+    if (g.length === 1) { out.push(g[0]); continue; }
+    const r = 0.02 * Math.min(1 + Math.floor(g.length / 6), 4);
+    g.forEach((p, i) => {
+      const a = (i / g.length) * Math.PI * 2;
+      out.push({ ...p, x: clamp(p.x + Math.cos(a) * r), y: clamp(p.y + Math.sin(a) * r) });
+    });
+  }
+  return out;
+}
+
+export const Legend = ({ items }: { items: { color: string; label: string }[] }) => (
+  <div className="legend">
+    {items.map((it) => (
+      <span key={it.label} className="legend-item">
+        <span className="dot" style={{ background: COLOR[it.color] ?? it.color }} />{it.label}
+      </span>
+    ))}
+  </div>
+);
+
 export function Scatter({
   points, edges = [], labels = [], height = 430, onCommit,
 }: {

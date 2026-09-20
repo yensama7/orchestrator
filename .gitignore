@@ -1,0 +1,28 @@
+# Secrets — this repo stores API keys and DB creds; never commit env files.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Node / web
+web/node_modules/
+web/dist/
+web/.vite/
+*.log
+npm-debug.log*
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local reference material, not part of the build
+references/

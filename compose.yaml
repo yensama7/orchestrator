@@ -1,0 +1,51 @@
+# Lineage — one command to bring the console up. §7 gates Run on a compose
+# file; this is that file for the whole system.
+#
+# db gets the real schema (§18.4 RLS included) on first boot; the backend
+# re-applies it idempotently on every start to close drift. web is a static
+# nginx build that reverse-proxies /api to the backend, and only starts once
+# the backend reports healthy.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: lineage
+      POSTGRES_PASSWORD: lineage
+      POSTGRES_DB: lineage
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/lineage/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lineage"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      # the app connects as the NOBYPASSRLS `app` role — RLS is the boundary (§18.4)
+      APP_DATABASE_URL: postgres://app:app@db:5432/lineage
+      # owner URL, used once on boot to apply the idempotent schema (drift-proof)
+      MIGRATE_DATABASE_URL: postgres://lineage:lineage@db:5432/lineage
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ./web
+    environment:
+      # nginx reverse-proxies /api to this upstream (§7). Same-origin, so the
+      # backend needs no CORS in this topology.
+      API_UPSTREAM: http://backend:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,54 @@
+"""Local transport — Ollama/vLLM (§4). Zero marginal cost; ~40% of calls should
+land here. Falls back to a deterministic echo so the orchestrator runs with no
+model server present (routing/fingerprint/summary shaped output)."""
+
+from __future__ import annotations
+
+import json
+import os
+
+from .base import Budget, Capacity, Completion, Prompt, Transport, Usage
+
+_OLLAMA = os.getenv("OLLAMA_URL")  # e.g. http://ollama:11434
+
+
+class LocalTransport(Transport):
+    def __init__(self, model: str = "qwen3-4b", concurrency: int = 4):
+        self.name = "local"
+        self.model = model
+        self._concurrency = concurrency
+
+    async def complete(self, prompt: Prompt, *, schema=None, budget: Budget | None = None) -> Completion:
+        if _OLLAMA:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(f"{_OLLAMA}/api/generate", json={
+                    "model": self.model,
+                    "prompt": f"{prompt.stable}\n{prompt.system}\n{prompt.user}",
+                    "stream": False,
+                })
+                r.raise_for_status()
+                data = r.json()
+                text = data.get("response", "")
+                return Completion(text, Usage(
+                    input_tokens=data.get("prompt_eval_count", 0),
+                    output_tokens=data.get("eval_count", 0), usd=0.0), raw=data)
+        # echo: deterministic structured stand-in, free
+        text = json.dumps({"choice": _echo_choice(prompt.user), "confidence": 0.6})
+        return Completion(text, Usage(input_tokens=len(prompt.user) // 4,
+                                      output_tokens=len(text) // 4, usd=0.0))
+
+    def capacity(self) -> Capacity:
+        return Capacity(limit=self._concurrency, unit="slots")
+
+
+def _echo_choice(user: str) -> str:
+    u = user.lower()
+    if "auth" in u:
+        return "JWT"
+    if "db" in u or "database" in u:
+        return "postgres 16"
+    if "payment" in u:
+        return "paystack"
+    return "proceed"

@@ -208,11 +208,11 @@ export function Donut({ slices, size = 120, centerLabel }: {
     : { big: fmt(total, slices[0]?.unit), small: centerLabel ?? "total" };
 
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}
+    <svg className="chart" width={size} height={size} viewBox={`0 0 ${size} ${size}`}
       onMouseLeave={() => { setHi(null); hideTip(); }}>
       {arcs.map((a, i) => (
-        <path key={i} d={a.d} fill={hex(slices[i].color)}
-          style={{ opacity: hi == null || hi === i ? 1 : 0.55, cursor: "default" }}
+        <path key={i} d={a.d} fill={hex(slices[i].color)} stroke="var(--ink2)" strokeWidth="1.5"
+          style={{ opacity: hi == null || hi === i ? 1 : 0.55, transition: "opacity .12s", cursor: "default" }}
           onMouseMove={(e) => {
             setHi(i);
             const pct = Math.round((slices[i].value / total) * 100);
@@ -225,6 +225,64 @@ export function Donut({ slices, size = 120, centerLabel }: {
       <text x={cx} y={cy - 2} textAnchor="middle" fontFamily="var(--mono)" fontSize="15" fill={HEX.bone}>{center.big}</text>
       <text x={cx} y={cy + 12} textAnchor="middle" fontSize="10" fill={HEX.dimmer}>{center.small}</text>
     </svg>
+  );
+}
+
+// ── variable-radius pie for agent comparison ────────────────────────────────
+// Angle encodes share (a real pie); radius also scales with the value, so the
+// biggest contributor reads big both ways. `scale=false` → plain equal-radius pie.
+export function Pie({ slices, size = 150, scale = true, unit }: {
+  slices: Slice[]; size?: number; scale?: boolean; unit?: string;
+}) {
+  const [hi, setHi] = useState<number | null>(null);
+  const total = slices.reduce((s, x) => s + x.value, 0) || 1;
+  const max = Math.max(...slices.map((s) => s.value), 1);
+  const r = size / 2, cx = r, cy = r, gap = 0.018;
+  const rMax = size * 0.46, rMin = size * 0.28;
+  const outer = (v: number) => scale ? rMin + Math.sqrt(v / max) * (rMax - rMin) : rMax;
+
+  let a0 = -Math.PI / 2;
+  const arcs = slices.map((s) => {
+    const a1 = a0 + (s.value / total) * Math.PI * 2;
+    const rad = outer(s.value), mid = (a0 + a1) / 2;
+    const P = (ang: number, k = 1) => [cx + Math.cos(ang) * rad * k, cy + Math.sin(ang) * rad * k];
+    const [x0, y0] = P(a0 + gap), [x1, y1] = P(a1 - gap);
+    const large = a1 - a0 - 2 * gap > Math.PI ? 1 : 0;
+    a0 = a1;
+    return { d: `M${cx},${cy} L${x0},${y0} A${rad},${rad} 0 ${large} 1 ${x1},${y1} Z`, mid, rad };
+  });
+
+  return (
+    <div className="pie-wrap">
+      <svg className="chart" width={size} height={size} viewBox={`0 0 ${size} ${size}`}
+        onMouseLeave={() => { setHi(null); hideTip(); }}>
+        <defs>
+          {slices.map((s, i) => (
+            <radialGradient key={i} id={`pie-${i}`} cx="50%" cy="50%" r="75%">
+              <stop offset="0%" stopColor={hex(s.color)} stopOpacity="0.72" />
+              <stop offset="100%" stopColor={hex(s.color)} stopOpacity="1" />
+            </radialGradient>
+          ))}
+        </defs>
+        {arcs.map((a, i) => {
+          const [tx, ty] = [cx + Math.cos(a.mid) * (hi === i ? 5 : 0), cy + Math.sin(a.mid) * (hi === i ? 5 : 0)];
+          return (
+            <path key={i} d={a.d} fill={`url(#pie-${i})`} stroke="var(--ink2)" strokeWidth="1.5"
+              transform={`translate(${tx - cx},${ty - cy})`}
+              style={{ opacity: hi == null || hi === i ? 1 : 0.5, transition: "opacity .12s, transform .12s", cursor: "default" }}
+              onMouseMove={(e) => {
+                setHi(i);
+                const pct = Math.round((slices[i].value / total) * 100);
+                showTip(e.clientX, e.clientY, [
+                  { text: slices[i].label, color: hex(slices[i].color), weight: 600 },
+                  { text: `${fmt(slices[i].value, slices[i].unit ?? unit)} · ${pct}%`, mono: true, color: HEX.dim },
+                ]);
+              }} />
+          );
+        })}
+      </svg>
+      <Legend items={slices.map((s) => ({ color: s.color, label: s.label }))} />
+    </div>
   );
 }
 
@@ -258,11 +316,27 @@ export function LineChart({ data, series, footer, height = 130 }: {
     showTip(e.clientX, e.clientY, lines);
   };
 
+  const area = (key: string) =>
+    `M${xs[0]},${H - pad} ` + data.map((d, i) => `L${xs[i]},${y(d[key] ?? 0)}`).join(" ") +
+    ` L${xs[data.length - 1]},${H - pad} Z`;
+
   return (
-    <svg ref={ref} viewBox={`0 0 ${W} ${H}`} width="100%" height={height}
+    <svg ref={ref} className="chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={height}
       onMouseMove={onMove} onMouseLeave={() => { setHi(null); hideTip(); }}>
+      <defs>
+        {series.map((s) => (
+          <linearGradient key={s.key} id={`area-${s.key}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={hex(s.color)} stopOpacity="0.22" />
+            <stop offset="100%" stopColor={hex(s.color)} stopOpacity="0" />
+          </linearGradient>
+        ))}
+      </defs>
+      {series.filter((s) => s.key !== "uncached").map((s) => (
+        <path key={s.key + "-a"} fill={`url(#area-${s.key})`} stroke="none" d={area(s.key)} />
+      ))}
       {series.map((s) => (
-        <path key={s.key} fill="none" stroke={hex(s.color)} strokeWidth="1.5"
+        <path key={s.key} fill="none" stroke={hex(s.color)} strokeWidth="1.75"
+          strokeLinecap="round" strokeLinejoin="round"
           strokeDasharray={s.key === "uncached" ? "3 3" : undefined}
           d={data.map((d, i) => `${i ? "L" : "M"}${xs[i]},${y(d[s.key] ?? 0)}`).join(" ")} />
       ))}

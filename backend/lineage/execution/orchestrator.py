@@ -55,12 +55,20 @@ async def _run(run_id: UUID) -> None:
         await _reset_agents()
         await mem.append_episodic(run_id, "ticker", {"key": "planned", "text": f"{len(dag.nodes)} nodes"})
 
+        halted = False
         for level in scheduler.levels(dag):
+            if await _over_ceiling(run_id, ceiling):
+                halted = True
+                await mem.append_episodic(run_id, "ticker",
+                    {"key": "blocked", "text": f"ceiling ${ceiling:.2f} reached — run halted"})
+                break
             await asyncio.gather(*(_node(run_id, n, fp, arb, roster) for n in level))
 
+        status = "abandoned" if halted else "passed"
         async with tenant_conn() as c:
-            await c.execute("UPDATE runs SET status='passed' WHERE id=$1", run_id)
-        await mem.append_episodic(run_id, "ticker", {"key": "passed", "text": "run complete"})
+            await c.execute("UPDATE runs SET status=$2 WHERE id=$1", run_id, status)
+        if not halted:
+            await mem.append_episodic(run_id, "ticker", {"key": "passed", "text": "run complete"})
     except Exception as e:
         await mem.append_episodic(run_id, "ticker", {"key": "failed", "text": str(e)[:90]})
     finally:
@@ -86,24 +94,35 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster) -> None:
         winner = next((p for p in proposals if p.id == decision.winner), proposals[0])
         vres = await verify.run(node.acceptance, winner.body)
         status = "passed" if vres.passed else "failed"
+        winner_agent, winner_body = winner.agent, winner.body
 
-        # commit per-agent usage (tokens/cost/pass) — this is what fills the charts
+        # commit per-agent usage (tokens/cost/pass) — this is what fills the charts.
+        # pass credit is tied to the arbiter's winner attempt, before resurrection.
         for a in agents:
             u = per_agent[a["agent"]]
             await _bump_agent(a["agent"], u["tokens"], u["cost"], u["cached"],
                               passed=(a["agent"] == winner.agent and status == "passed"))
         await _charge(run_id, sum(u["cost"] for u in per_agent.values()))
 
+        # §8: the winner failed verification → resurrect the highest-ranked dormant
+        # dissent for this node and re-verify it. A dissenter that now passes is
+        # vindicated (and becomes the effective decision); one that fails is refuted.
+        if status == "failed":
+            revived = await _resurrect_and_settle(run_id, node)
+            if revived:
+                winner_agent, winner_body = revived
+                status = "passed"
+
         # record every passed decision, not a hardcoded three — this is what
         # retrieve() feeds back into later prompts, so the memory has to be real.
-        choice = winner.body.get("choice")
+        choice = winner_body.get("choice")
         if status == "passed" and choice:
             subject = node.id.split(".")[0]
             await mem.write_semantic(run_id, subject, f"{subject} = {choice}",
-                                     rationale=node.intent, decided_by=winner.agent)
+                                     rationale=node.intent, decided_by=winner_agent)
         await mem.append_episodic(run_id, "node", {
-            "node": node.id, "winner": winner.agent, "status": status,
-            "stage": decision.stage, "text": f"{node.id} · {winner.agent} · {status}"})
+            "node": node.id, "winner": winner_agent, "status": status,
+            "stage": decision.stage, "text": f"{node.id} · {winner_agent} · {status}"})
     finally:
         await leases.release(held)
         await _set_state([a["agent"] for a in agents], "idle")
@@ -122,7 +141,7 @@ def _pick(roster: dict, node: NodeSpec) -> list[dict]:
 async def _propose(run_id, node, fp, agents) -> tuple[list[Proposal], dict]:
     proposals: list[Proposal] = []
     per_agent: dict[str, dict] = {}
-    for i, a in enumerate(agents):
+    for a in agents:
         await _set_state([a["agent"]], "running")
         comp = await _dispatch(a, node, fp, run_id)
         per_agent[a["agent"]] = {
@@ -132,8 +151,25 @@ async def _propose(run_id, node, fp, agents) -> tuple[list[Proposal], dict]:
         }
         proposals.append(Proposal(
             id=f"{node.id}:{a['agent']}", agent=a["agent"], body=_body(comp, node),
-            agreement=round(0.9 - 0.25 * i, 3), normalised_cost=min(comp.usage.usd, 1.0)))
+            normalised_cost=min(comp.usage.usd, 1.0)))
+    for p, ag in zip(proposals, await _agreements(proposals)):
+        p.agreement = ag
     return proposals, per_agent
+
+
+async def _agreements(proposals: list[Proposal]) -> list[float]:
+    """Real semantic agreement (stage-3 input): each proposal's mean cosine to its
+    peers' choice text. Embeddings are L2-normalised, so dot == cosine; a lone
+    proposal trivially agrees with itself (1.0). Replaces the old dispatch-order
+    synthetic that just biased toward whoever went first."""
+    if len(proposals) < 2:
+        return [1.0] * len(proposals)
+    vecs = [await embed(str(p.body.get("choice", ""))) for p in proposals]
+    out = []
+    for i, vi in enumerate(vecs):
+        peers = [sum(a * b for a, b in zip(vi, vj)) for j, vj in enumerate(vecs) if j != i]
+        out.append(round(max(0.0, sum(peers) / len(peers)), 3))
+    return out
 
 
 async def _dispatch(a: dict, node: NodeSpec, fp: SpecFingerprint, run_id) -> Completion:
@@ -270,6 +306,42 @@ async def _record_dissent(run_id, node_id, proposals, decision) -> None:
     await mem.append_episodic(run_id, "dissent", {"node": node_id, "text": f"{len(losers)} overruled"})
 
 
+async def _resurrect_and_settle(run_id, node: NodeSpec):
+    """§8: the winner failed → walk the dormant dissents for this node, highest
+    stage first, re-verifying each stored proposal. First one that passes is
+    vindicated and returned as the effective (agent, body); the rest that get
+    tried and fail are refuted. Mirrors DissentLedger.resurrect/settle over SQL."""
+    async with tenant_conn() as c:
+        rows = await c.fetch(
+            """SELECT id, dissenter, proposal FROM dissent
+               WHERE run_id=$1 AND node_id=$2 AND status='dormant'
+               ORDER BY stage DESC, id ASC""", run_id, node.id)
+    for r in rows:
+        body = json.loads(r["proposal"]) if isinstance(r["proposal"], str) else (r["proposal"] or {})
+        vres = await verify.run(node.acceptance, body)
+        outcome = "vindicated" if vres.passed else "refuted"
+        async with tenant_conn() as c:
+            await c.execute("UPDATE dissent SET status=$2 WHERE id=$1", r["id"], outcome)
+        await _bump_vind(r["dissenter"])
+        await mem.append_episodic(run_id, "dissent",
+            {"node": node.id, "text": f"{r['dissenter']} resurrected → {outcome}"})
+        if vres.passed:
+            return r["dissenter"], body
+    return None
+
+
+async def _bump_vind(agent: str) -> None:
+    """Recompute an agent's vindication rate from its settled dissents — the
+    Agents-table 'Vind' column and the dissent leaderboard both read this."""
+    async with tenant_conn() as c:
+        row = await c.fetchrow(
+            """SELECT count(*) FILTER (WHERE status='vindicated') AS v,
+                      count(*) FILTER (WHERE status IN ('vindicated','refuted')) AS t
+               FROM dissent WHERE dissenter=$1""", agent)
+        pct = (row["v"] / row["t"] * 100) if row["t"] else None
+        await c.execute("UPDATE agents SET vind_pct=$2 WHERE agent=$1", agent, pct)
+
+
 # ── live state mutation on the shared agents rows ───────────────────────────
 async def _roster() -> dict:
     async with tenant_conn() as c:
@@ -307,6 +379,14 @@ async def _charge(run_id, usd: float) -> None:
         spent = await c.fetchval(
             "UPDATE runs SET spent_usd=spent_usd+$2 WHERE id=$1 RETURNING spent_usd", run_id, usd)
     await mem.append_episodic(run_id, "spend", {"spent": float(spent)})
+
+
+async def _over_ceiling(run_id, ceiling: float) -> bool:
+    """Budget gate (§7): halt the walk once the run's spend crosses its ceiling.
+    Checked per level, not mid-dispatch — a level in flight finishes, then we stop."""
+    async with tenant_conn() as c:
+        spent = await c.fetchval("SELECT spent_usd FROM runs WHERE id=$1", run_id)
+    return float(spent or 0) >= ceiling
 
 
 async def _load(run_id):

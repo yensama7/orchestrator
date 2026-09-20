@@ -1,5 +1,5 @@
 import { useApi } from "../api";
-import { Donut, EmptyState, LineChart, Panel, PanelHeader, Slice } from "../components";
+import { Donut, EmptyState, LineChart, Panel, PanelHeader, Pie, Slice } from "../components";
 import { TipLine } from "../hover";
 
 type Agent = {
@@ -77,11 +77,11 @@ export default function Agents() {
               ? <LineChart data={charts.throughput} series={[{ key: "nodes", label: "nodes", color: "violet" }]} />
               : <Empty />}
           </ChartCard>
-          <ChartCard title="Token attribution" hint="what filled the context window">
-            {charts.token_attr.length ? <Donut slices={charts.token_attr} centerLabel="tokens" /> : <Empty />}
+          <ChartCard title="Token attribution" hint="by agent — radius scales with tokens">
+            {charts.token_attr.length ? <Pie slices={charts.token_attr} unit="tokens" /> : <Empty />}
           </ChartCard>
-          <ChartCard title="Cost share" hint="by agent — differs from token share">
-            {charts.cost_share.length ? <Donut slices={charts.cost_share} centerLabel="spend" /> : <Empty />}
+          <ChartCard title="Cost share" hint="by agent — radius scales with spend">
+            {charts.cost_share.length ? <Pie slices={charts.cost_share} unit="$" /> : <Empty />}
           </ChartCard>
           <ChartCard title="Verification" hint="nodes by outcome">
             {charts.verification.some((s) => s.value) ? <Donut slices={charts.verification} centerLabel="nodes" /> : <Empty />}

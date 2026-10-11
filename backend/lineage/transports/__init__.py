@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from .api import ApiTransport
 from .base import Budget, Capacity, Completion, Prompt, Transport, Usage
+from .fixture import FixtureTransport
 from .local import LocalTransport
 from .subscription import CLIS, SubscriptionTransport
 
 
 def build(model: str, transport: str, api_key: str | None = None) -> Transport:
+    if transport == "fixture":  # §P5 onboarding: recorded real artifacts, verified live
+        return FixtureTransport(model)
     if transport == "local":
         return LocalTransport(model)
     if transport == "subscription":
@@ -19,4 +22,5 @@ def build(model: str, transport: str, api_key: str | None = None) -> Transport:
 
 
 __all__ = ["build", "Transport", "Prompt", "Budget", "Completion", "Usage",
-           "Capacity", "ApiTransport", "LocalTransport", "SubscriptionTransport"]
+           "Capacity", "ApiTransport", "LocalTransport", "SubscriptionTransport",
+           "FixtureTransport"]

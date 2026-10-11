@@ -1,10 +1,9 @@
--- Lineage schema — the real target (§5, §6, §8, §18). Forward-only and
--- idempotent: re-running is a no-op, so the backend applies it on every boot
--- (as the owning role) to close schema drift on a persisted volume. Postgres'
--- initdb mount only runs on first boot; this is what keeps an older volume from
--- silently missing tables added later (that's what broke runs on `roles`).
--- ponytail: single-file idempotent schema; split into db/migrations/NNN_*.sql
--- only when a destructive/ordered change needs it.
+-- Lineage schema — migration 001 (baseline). The real target (§5, §6, §8, §18).
+-- Forward-only and idempotent: re-running is a no-op, so the runner (db/tenancy.py)
+-- re-applies every migration on boot to close schema drift on a persisted volume
+-- (initdb only runs on first boot — that's what broke runs on `roles`). Later
+-- ordered/destructive changes go in new db/migrations/NNN_*.sql files, never by
+-- editing this one.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -224,8 +223,10 @@ CREATE TABLE IF NOT EXISTS roles (
   PRIMARY KEY (tenant_id, name)
 );
 
--- Model credentials the user enters in Settings (local tool → key stored here).
--- ponytail: plaintext at rest; wrap with a KMS/secret store before shipping.
+-- Model credentials the user enters in Settings. `api_key` is sealed at rest by
+-- security/vault.py (envelope encryption, KMS-swappable) when LINEAGE_SECRET_KEY
+-- is set — a dump/backup/row-log never carries a usable key. Sealed values carry
+-- an `enc:v1:` marker; legacy plaintext opens unchanged, so no backfill is needed.
 CREATE TABLE IF NOT EXISTS model_credentials (
   tenant_id  uuid NOT NULL,
   model      text NOT NULL,

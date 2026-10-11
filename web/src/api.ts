@@ -23,22 +23,31 @@ export const useApi = <T,>(key: string, run?: string) =>
 
 export type TickerEvent = { key: string; text: string };
 
+// SSE-first liveness (§P4d). Source of truth is the stream; the 4s poll is a
+// *reconnect fallback* that only runs while the stream is down. This module flag
+// is what the react-query default reads (main.tsx) to decide whether to poll, so
+// a healthy SSE connection means zero background polling — no duplicate fetches.
+// Starts stale so the very first load still fetches if SSE never connects.
+export const sse = { stale: true };
+
 // SSE — ticker + spend (§20.9). Native EventSource: reconnects for free.
 export function useStream(runId: string) {
   const [events, setEvents] = useState<TickerEvent[]>([]);
   const [spent, setSpent] = useState<number | null>(null);
-  const [stale, setStale] = useState(false);
+  const [stale, setStale] = useState(true);
 
   useEffect(() => {
     const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream`);
+    const up = () => { sse.stale = false; setStale(false); };
+    es.onopen = up;
     es.addEventListener("ticker", (e) => {
+      up();
       const ev = JSON.parse((e as MessageEvent).data);
-      setStale(false);
       setEvents((prev) => [ev, ...prev].slice(0, 40)); // newest first
     });
-    es.addEventListener("spend", (e) => setSpent(JSON.parse((e as MessageEvent).data).spent));
-    es.onerror = () => setStale(true);
-    return () => es.close();
+    es.addEventListener("spend", (e) => { up(); setSpent(JSON.parse((e as MessageEvent).data).spent); });
+    es.onerror = () => { sse.stale = true; setStale(true); };
+    return () => { es.close(); sse.stale = true; };
   }, [runId]);
 
   return { events, spent, stale };

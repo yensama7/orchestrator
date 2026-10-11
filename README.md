@@ -12,21 +12,47 @@ says to (§17).
 docker compose up --build
 ```
 
-- Console → http://localhost:5173
+- Console → http://localhost:5173 (opens in the **Simple** UI; toggle **Expert** top-left)
 - API → http://localhost:8000/api/health
 - Postgres (pgvector) → localhost:5432 (`lineage`/`lineage`)
+
+## See a verified build in one command
+
+No API key, no GPU — a genuinely verified result (real toolchain runs the produced
+code in the sandbox; only the generation is recorded):
+
+```bash
+docker compose up -d db
+docker compose run --rm backend python -m lineage.onboarding
+```
+
+Prints the run mode (`live`), verified-node count, and cost-per-verified-result —
+the same headline the Simple UI shows.
+
+### Securing API keys at rest
+
+Keys entered in Settings are stored plaintext unless you set a master key, in
+which case they're sealed with envelope encryption (KMS-swappable, `security/vault.py`):
+
+```bash
+export LINEAGE_SECRET_KEY=$(python -m lineage.security.vault --keygen)
+```
 
 ## What's here
 
 | Area | Status |
 |------|--------|
+| **Simple / Expert UI** — Simple (brief→progress→result+cost/verified) default; Expert unhides the full console | ✅ §P5, progressive disclosure |
+| **One-command onboarding** — `python -m lineage.onboarding` → a verified `live` build, no key | ✅ §P5, CI-proven |
+| **API keys sealed at rest** — envelope encryption (KMS-swappable) when `LINEAGE_SECRET_KEY` set | ✅ §P5, self-checked |
+| **Migrations** — forward-only `db/migrations/NNN_*.sql` + runner, tested on a seeded DB in CI | ✅ §P5 |
 | Six views (New run, Lineage, Memory, Agents, Dissent, Workspace) | ✅ §19, tokens §12 |
 | Header spend rail + quota, rail-nav, **live SSE ticker** (tails episodic_events) | ✅ |
 | **Postgres persistence** — every view DB-backed, mutated live by the engine | ✅ |
 | **Tenancy/RLS** — enabled + **forced**, app connects as `NOBYPASSRLS` role (§18.4) | ✅ isolation verified |
 | Contracts (Pydantic, `extra=forbid` injection defence) | ✅ §20.2 |
 | **Live orchestrator** — DAG walk, consensus arbitration, dissent, verify, leases | ✅ §17 M1+consensus |
-| **Verifies behavior** (runs the produced code: build/test/lint) | ❌ **no (M1)** — verifiers are structural only; lands in Phase 1 |
+| **Verifies behavior** (runs the produced code: build/test/lint/schema in the sandbox) | ✅ §P1b, self-checked — a run is `live` only once a behavioral verifier gates it |
 | **Run mode** — every run tagged `simulated`/`live`; a simulated run can't earn verified-skill credit | ✅ §P0 truth-in-labeling, self-checked |
 | Deterministic five-stage arbiter | ✅ real + self-checked, §18.3 |
 | Dissent ledger (record / resurrect / settle, all over SQL) | ✅ real, populated by live runs, §8 |
@@ -104,7 +130,7 @@ backend/lineage/
   memory/        embed · retrieval · store · supersede · distil
                  · manifest · registry · drift        (§5, §18.2, §20.7)
   security/      broker · taint · egress · scan       (§11)
-  db/            schema.sql · tenancy · seed          (§18.4)
+  db/            migrations/ · tenancy (runner) · seed (§18.4, §P5)
   api/           main (routes + SSE)
 web/src/         shell (App) · components · CodeEditor · lang/registry (§13)
                  · views/{newrun,lineage,memory,agents,dissent,workspace}

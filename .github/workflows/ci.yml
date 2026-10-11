@@ -1,0 +1,62 @@
+# CI (phases.md §P4c): security is tested as a first-class gate on every commit,
+# not "verified manually against the running stack." The red-team suite plants a
+# secret and fails the build if it reaches any channel; the core suite runs every
+# module's self-check. Both are DB-free, so CI needs no Postgres.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Core self-checks
+        run: python -m tests.test_core
+      - name: Security red-team (defense-in-depth)
+        run: python -m tests.test_security
+
+  # §P5: migrations are forward-only and tested on a seeded DB — not "verified
+  # manually against the running stack." Applies from scratch, re-applies (must be
+  # idempotent), then seeds real substrate through the RLS app role.
+  migrations:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: lineage
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      MIGRATE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/lineage
+      APP_DATABASE_URL: postgres://app:app@localhost:5432/lineage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Migrate + seed on a fresh DB
+        run: python -m tests.migrate_check
+      - name: Onboarding reaches a verified live result
+        run: python -m lineage.onboarding

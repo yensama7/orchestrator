@@ -42,7 +42,7 @@ async def run_header(c, run_id) -> dict:
     if r is None:  # no current run (empty db) — render an empty header, not a 500
         idle = sum(1 for a in agents if a["state"] == "idle")
         return {"id": "—", "label": "—", "spec": "no active run", "template": "—",
-                "mode": "simulated", "spent": 0.0,
+                "mode": "simulated", "status": "none", "spent": 0.0,
                 "verified_count": 0, "cost_per_verified": None,
                 "projected": 0.0, "ceiling": 0.0,
                 "rail": [{"label": "remaining", "usd": 0.0, "color": "ink3"}],
@@ -71,7 +71,7 @@ async def run_header(c, run_id) -> dict:
     verified = int(r["verified_count"] or 0)
     return {
         "id": str(run_id), "label": _short(run_id), "spec": r["name"], "template": r["tmpl"] or "—",
-        "mode": r["mode"], "spent": round(spent, 2),
+        "mode": r["mode"], "status": r["status"], "spent": round(spent, 2),
         "verified_count": verified,
         "cost_per_verified": round(spent / verified, 2) if verified else None,
         "projected": round(min(ceiling, spent * 1.4) if spent else 0, 2),

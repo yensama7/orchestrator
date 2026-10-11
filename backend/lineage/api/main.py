@@ -25,6 +25,7 @@ from ..execution import reverify as reverify_mod
 from ..execution import runner as runner_mod
 from ..execution import worktree as worktree_mod
 from ..memory import drift as drift_mod
+from ..security import vault
 from ..transports import Budget, Prompt, build as build_transport
 from ..planning import extract as extract_mod
 from ..planning import match as match_mod
@@ -280,7 +281,7 @@ async def settings():
         ags = await c.fetch("SELECT agent, role, model, transport, enabled FROM agents ORDER BY ordinal")
     return {
         "credentials": [{"model": r["model"], "transport": r["transport"], "enabled": r["enabled"],
-                         "has_key": bool(r["api_key"]), "key_hint": _mask(r["api_key"])} for r in creds],
+                         "has_key": bool(r["api_key"]), "key_hint": _mask(vault.open_(r["api_key"]))} for r in creds],
         "agents": [dict(r) for r in ags],
     }
 
@@ -314,12 +315,15 @@ async def add_cred(body: CredIn):
     effective_key = body.api_key
     if body.transport == "api" and not effective_key:
         async with tenant_conn() as c:
-            effective_key = await c.fetchval(
-                "SELECT api_key FROM model_credentials WHERE model=$1", body.model)
+            effective_key = vault.open_(await c.fetchval(
+                "SELECT api_key FROM model_credentials WHERE model=$1", body.model))
     test: dict | None = None
     if body.transport != "api" or effective_key:
         test = await _probe(body.model, body.transport, effective_key)
     async with tenant_conn() as c:
+        # §P5: seal the key before it touches the DB — a dump/backup/row-log never
+        # carries a usable key. COALESCE keeps the stored (sealed) key when the
+        # user edits a row without re-entering it.
         await c.execute(
             """INSERT INTO model_credentials (tenant_id, model, transport, api_key, enabled)
                VALUES (current_setting('app.tenant_id')::uuid, $1,$2,$3,$4)
@@ -327,7 +331,7 @@ async def add_cred(body: CredIn):
                  SET transport=EXCLUDED.transport,
                      api_key=COALESCE(EXCLUDED.api_key, model_credentials.api_key),
                      enabled=EXCLUDED.enabled""",
-            body.model, body.transport, body.api_key, body.enabled)
+            body.model, body.transport, vault.seal(body.api_key), body.enabled)
     return {"ok": True, "tested": test is not None, **(test or {"detail": "no key to test"})}
 
 
@@ -338,7 +342,7 @@ async def test_cred(model: str):
             "SELECT model, transport, api_key FROM model_credentials WHERE model=$1", model)
     if r is None:
         return {"tested": False, "working": False, "detail": "not configured"}
-    return {"tested": True, **await _probe(r["model"], r["transport"], r["api_key"])}
+    return {"tested": True, **await _probe(r["model"], r["transport"], vault.open_(r["api_key"]))}
 
 
 @app.delete("/api/settings/credentials/{model}")
@@ -546,7 +550,9 @@ async def run_compose(run_id: str):
         await runner_mod.start(wt, g)
     except FileNotFoundError:
         return {"started": False, "reason": "docker_missing", "worktree": str(wt)}
-    return {"started": True, "file": g.file, "worktree": str(wt)}
+    except RuntimeError as e:
+        return {"started": False, "reason": str(e), "worktree": str(wt)}
+    return {"started": True, "file": g.file, "kind": g.kind, "worktree": str(wt)}
 
 
 # ── templates: freshness / drift (§18.2) ─────────────────────────────────────

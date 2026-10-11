@@ -26,6 +26,7 @@ from ..memory.embed import embed
 from . import worktree
 from ..memory.retrieval import retrieve
 from ..planning.plan import build_dag
+from ..security.redact import redact
 from ..transports import Prompt, build as build_transport
 from ..transports.base import Completion
 from . import leases, routing, scheduler, verify
@@ -395,14 +396,19 @@ def _jarr(v) -> list:
 
 
 def _body(comp: Completion, node: NodeSpec) -> dict:
+    # §P4b: redact the raw model output before it becomes a proposal — this scrubs
+    # a leaked secret out of `choice`, every produced file, and semantic memory in
+    # one place, upstream of the DB. The placeholder carries no quotes, so JSON
+    # redacted as text still parses.
+    text = redact(comp.text)
     try:
-        b = json.loads(comp.text)
+        b = json.loads(text)
         if isinstance(b, dict):
-            b.setdefault("choice", comp.text[:40])
+            b.setdefault("choice", text[:40])
             return b
     except (json.JSONDecodeError, TypeError):
         pass
-    return {"choice": comp.text.strip()[:60] or node.intent, "confidence": 0.6}
+    return {"choice": text.strip()[:60] or node.intent, "confidence": 0.6}
 
 
 async def _fork_spec(run_id):
@@ -497,7 +503,8 @@ async def _bump_vind(agent: str) -> None:
 async def _roster() -> dict:
     async with tenant_conn() as c:
         agents = await c.fetch("SELECT agent, role, model, transport FROM agents WHERE enabled ORDER BY ordinal")
-        creds = {r["model"]: r["api_key"] for r in
+        from ..security import vault  # §P5: keys are sealed at rest, opened here
+        creds = {r["model"]: vault.open_(r["api_key"]) for r in
                  await c.fetch("SELECT model, api_key FROM model_credentials WHERE enabled")}
     out: dict[str, list[dict]] = {}
     for a in agents:

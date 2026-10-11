@@ -15,7 +15,10 @@ services:
       POSTGRES_DB: lineage
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./backend/lineage/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # first-boot: Postgres runs every migration in NNN order. The backend's
+      # runner (db/tenancy.py) re-applies them idempotently on every start to
+      # close drift on an existing volume.
+      - ./backend/lineage/db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lineage"]
       interval: 5s

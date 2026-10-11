@@ -1,27 +1,24 @@
 """Egress secret scanning (§11). gitleaks as a subprocess on every artifact
 before it leaves the sandbox; a built-in regex sweep is the fallback when
-gitleaks isn't installed so the gate is never silently open."""
+gitleaks isn't installed so the gate is never silently open.
+
+The regex sweep shares PATTERNS with the redactor (redact.py, §P4b): the egress
+gate and the defense-in-depth redaction detect the exact same secret shapes, so
+one can never catch what the other misses."""
 
 from __future__ import annotations
 
 import asyncio
-import re
 import shutil
 
-_PATTERNS = [
-    re.compile(r"AKIA[0-9A-Z]{16}"),                         # AWS access key
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),                      # OpenAI-style key
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),                      # GitHub PAT
-    re.compile(r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----"), # private key
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),             # Slack token
-]
+from .redact import PATTERNS
 
 
 async def scan(text: str) -> list[str]:
     """Returns a list of findings. Empty list = clean = allowed to egress."""
     if shutil.which("gitleaks"):
         return await _gitleaks(text)
-    return [m.group(0)[:8] + "…" for p in _PATTERNS for m in p.finditer(text)]
+    return [m.group(0)[:8] + "…" for _name, p in PATTERNS for m in p.finditer(text)]
 
 
 async def _gitleaks(text: str) -> list[str]:

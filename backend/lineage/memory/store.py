@@ -6,15 +6,19 @@ from __future__ import annotations
 from uuid import UUID
 
 from ..db.tenancy import tenant_conn
+from ..security.redact import redact_obj
 from .embed import embed, to_pgvector
 
 
 async def append_episodic(run_id: UUID, kind: str, payload: dict) -> None:
+    # §P4b defense-in-depth: scrub secrets *here*, the chokepoint the DB, the SSE
+    # stream, the console, and any log tailing episodic all read from — so a key
+    # can never reach a log line even if one slipped past the egress gate.
     async with tenant_conn() as c:
         await c.execute(
             """INSERT INTO episodic_events (tenant_id, run_id, kind, payload)
                VALUES (current_setting('app.tenant_id')::uuid, $1, $2, $3::jsonb)""",
-            run_id, kind, _json(payload),
+            run_id, kind, _json(redact_obj(payload)),
         )
 
 

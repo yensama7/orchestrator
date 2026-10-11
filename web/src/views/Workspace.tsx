@@ -29,7 +29,7 @@ export default function Workspace({ run }: { run?: string }) {
   const runCompose = async () => {
     setRunMsg("Starting…");
     const r = await fetch(`/api/runs/${run ?? "current"}/run`, { method: "POST" }).then((x) => x.json());
-    setRunMsg(r.started ? `compose up · ${r.file}` : `can't run: ${r.reason}`);
+    setRunMsg(r.started ? `${r.kind} · ${r.file}` : `can't run: ${r.reason}`);
   };
 
   const importFolder = async (files: FileList) => {

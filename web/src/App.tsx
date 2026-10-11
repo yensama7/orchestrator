@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useApi, useStream } from "./api";
 import { COLOR } from "./components";
@@ -9,10 +9,12 @@ import Agents from "./views/Agents";
 import Dissent from "./views/Dissent";
 import Workspace from "./views/Workspace";
 import SettingsView from "./views/Settings";
+import SimpleRun from "./views/SimpleRun";
 
 type RunData = {
   id: string; label: string; spec: string; template: string; mode: string;
-  spent: number; projected: number; ceiling: number;
+  status: string; spent: number; verified_count: number; cost_per_verified: number | null;
+  projected: number; ceiling: number;
   rail: { label: string; usd: number; color: string }[];
   cache_note: string;
   navfoot: { egress: string; agents: string; blocked: string };
@@ -34,6 +36,11 @@ const VIEWS = [
 
 export default function App() {
   const qc = useQueryClient();
+  // §P5 progressive disclosure: Simple is the default; Expert opts into the full
+  // console. One codebase — Expert just unhides the rail + machinery views.
+  const [ui, setUi] = useState<"simple" | "expert">(
+    () => (localStorage.getItem("ui") === "expert" ? "expert" : "simple"));
+  const setUiMode = (m: "simple" | "expert") => { localStorage.setItem("ui", m); setUi(m); };
   const [view, setView] = useState<string>("lineage");
   // null = follow the server's current run; a uuid = view that specific run.
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
@@ -41,6 +48,11 @@ export default function App() {
   const { data: runs } = useApi<RunsList>("runs");
   const { events, spent, stale } = useStream(run?.id ?? "current");
   const liveSpent = spent ?? run?.spent ?? 0;
+
+  // §P4d: each SSE delta (a new ticker line or a spend tick) invalidates the
+  // read queries so the open views refetch on real change — this is what lets
+  // polling stay off while the stream is healthy.
+  useEffect(() => { qc.invalidateQueries(); }, [events.length, spent, qc]);
 
   // after a New Run (or a fork) starts, that run becomes server-current — follow
   // it and refresh.
@@ -50,33 +62,44 @@ export default function App() {
     setView("lineage");
   };
 
+  const simple = ui === "simple";
+
   return (
-    <div className="shell">
+    <div className={"shell" + (simple ? " simple-ui" : "")}>
       <Header run={run} runs={runs} selectedRun={selectedRun} onSelectRun={setSelectedRun}
-              spent={liveSpent} stale={stale} onNewRun={() => setView("newrun")} />
+              spent={liveSpent} stale={stale} onNewRun={() => setView("newrun")}
+              ui={ui} onUi={setUiMode} />
 
-      <nav className="nav">
-        {VIEWS.map((v) => (
-          <button key={v.key} className={"nav-item" + (view === v.key ? " active" : "")}
-                  onClick={() => setView(v.key)}>
-            <span className="ico" aria-hidden>{v.ico}</span> {v.label}
-          </button>
-        ))}
-        <div className="navfoot">
-          <div>{run?.navfoot.egress}</div>
-          <div>{run?.navfoot.agents}</div>
-          <div>{run?.navfoot.blocked}</div>
-        </div>
-      </nav>
+      {!simple && (
+        <nav className="nav">
+          {VIEWS.map((v) => (
+            <button key={v.key} className={"nav-item" + (view === v.key ? " active" : "")}
+                    onClick={() => setView(v.key)}>
+              <span className="ico" aria-hidden>{v.ico}</span> {v.label}
+            </button>
+          ))}
+          <div className="navfoot">
+            <div>{run?.navfoot.egress}</div>
+            <div>{run?.navfoot.agents}</div>
+            <div>{run?.navfoot.blocked}</div>
+          </div>
+        </nav>
+      )}
 
-      <main className={"stage" + (view === "workspace" ? " flush" : "")}>
-        {view === "newrun" && <NewRun onDone={afterNewRun} />}
-        {view === "lineage" && <Lineage run={run?.id} />}
-        {view === "memory" && <Memory run={run?.id} />}
-        {view === "agents" && <Agents run={run?.id} />}
-        {view === "dissent" && <Dissent run={run?.id} onForked={afterNewRun} />}
-        {view === "workspace" && <Workspace run={run?.id} />}
-        {view === "settings" && <SettingsView />}
+      <main className={"stage" + (!simple && view === "workspace" ? " flush" : "")}>
+        {simple ? (
+          <SimpleRun run={run} events={events} onStarted={afterNewRun} />
+        ) : (
+          <>
+            {view === "newrun" && <NewRun onDone={afterNewRun} />}
+            {view === "lineage" && <Lineage run={run?.id} />}
+            {view === "memory" && <Memory run={run?.id} />}
+            {view === "agents" && <Agents run={run?.id} />}
+            {view === "dissent" && <Dissent run={run?.id} onForked={afterNewRun} />}
+            {view === "workspace" && <Workspace run={run?.id} />}
+            {view === "settings" && <SettingsView />}
+          </>
+        )}
       </main>
 
       <footer className="ticker" style={stale ? { opacity: 0.6 } : undefined}>
@@ -90,16 +113,20 @@ export default function App() {
   );
 }
 
-function Header({ run, runs, selectedRun, onSelectRun, spent, stale, onNewRun }: {
+function Header({ run, runs, selectedRun, onSelectRun, spent, stale, onNewRun, ui, onUi }: {
   run?: RunData; runs?: RunsList; selectedRun: string | null;
   onSelectRun: (id: string | null) => void;
   spent: number; stale: boolean; onNewRun: () => void;
+  ui: "simple" | "expert"; onUi: (m: "simple" | "expert") => void;
 }) {
-  const total = run ? run.rail.reduce((s, r) => s + r.usd, 0) : 1;
   return (
     <header className="header" style={stale ? { opacity: 0.6 } : undefined}>
       <div className="row1">
         <span className="wordmark">lineage<span className="tick">·</span>orchestrator</span>
+        <div className="ui-toggle" role="group" aria-label="interface mode">
+          <button className={ui === "simple" ? "on" : ""} onClick={() => onUi("simple")}>Simple</button>
+          <button className={ui === "expert" ? "on" : ""} onClick={() => onUi("expert")}>Expert</button>
+        </div>
         {runs && runs.runs.length > 0 ? (
           <select className="runid" value={selectedRun ?? runs.current}
             onChange={(e) => onSelectRun(e.target.value === runs.current ? null : e.target.value)}
@@ -115,7 +142,7 @@ function Header({ run, runs, selectedRun, onSelectRun, spent, stale, onNewRun }:
         <span className="spec">
           {run?.spec} · inherited from <a href="#">{run?.template}</a>
         </span>
-        <button className="newrun-btn" onClick={onNewRun}>+ New run</button>
+        {ui === "expert" && <button className="newrun-btn" onClick={onNewRun}>+ New run</button>}
         <div className="spend-nums">
           <span className="amber">${spent.toFixed(2)}<span className="lbl">spent</span></span>
           <span className="dim">${run?.projected.toFixed(2)}<span className="lbl">projected</span></span>

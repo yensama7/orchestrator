@@ -259,3 +259,30 @@ textarea { width: 100%; resize: vertical; }
 
 .section-title { font-size: 12px; color: var(--dim); margin: 18px 0 8px; font-weight: 600; }
 h2.view-title { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
+
+/* §P5 Simple/Expert — progressive disclosure */
+.ui-toggle { display: inline-flex; margin-left: 14px; border: 1px solid var(--line2); border-radius: 4px; overflow: hidden; }
+.ui-toggle button {
+  background: transparent; color: var(--dim); border: none; font-size: 11px;
+  padding: 3px 10px; font-family: var(--mono);
+}
+.ui-toggle button.on { background: var(--amber); color: #1a1405; font-weight: 500; }
+/* Simple UI drops the nav rail, so the stage spans the full width. */
+.shell.simple-ui {
+  grid-template-columns: 1fr;
+  grid-template-areas: "header" "stage" "ticker";
+}
+
+.simple { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.simple .result .panel-h { display: flex; align-items: center; gap: 10px; }
+.result-metrics { display: flex; gap: 32px; margin: 14px 0 6px; }
+.status-pill {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--dim); border: 1px solid var(--line2); border-radius: 3px; padding: 2px 7px;
+}
+.status-pill.passed { color: var(--sage); border-color: var(--sage); }
+.status-pill.active { color: var(--amber); border-color: var(--amber); }
+.status-pill.failed, .status-pill.abandoned { color: var(--rust); border-color: var(--rust); }
+.progress-log { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.progress-log .line { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.progress-log .line .k { color: var(--dimmer); margin-right: 8px; text-transform: uppercase; }

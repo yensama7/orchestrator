@@ -50,16 +50,7 @@ class Sandbox:
         return n
 
     async def exec(self, argv: list[str], *, network: bool = False, timeout: float = 60) -> tuple[int, str]:
-        if _DOCKER:
-            cmd = ["docker", "run", "--rm", "--read-only",
-                   "--tmpfs", "/tmp", "-v", f"{self.workdir}:/work", "-w", "/work"]
-            if _has_runtime():
-                cmd += ["--runtime", _RUNTIME]          # syscall isolation (§11)
-            if not network:
-                cmd += ["--network", "none"]            # egress default-deny (§11)
-            cmd += ["python:3.12-slim", *argv]
-        else:
-            cmd = argv
+        cmd = docker_argv(self.workdir, "python:3.12-slim", argv, network=network) if _DOCKER else argv
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=self.workdir, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT)
@@ -100,6 +91,20 @@ class SandboxPool:
 
 def _has_runtime() -> bool:
     return shutil.which(_RUNTIME) is not None
+
+
+def docker_argv(workdir: str, image: str, argv: list[str], *, network: bool = False) -> list[str]:
+    """The canonical locked-down `docker run` invocation: read-only rootfs, tmpfs
+    /tmp, gVisor runtime when present (syscall isolation, §11), network default-
+    deny. Shared by the sandbox pool and the execution adapters (runner.py) so a
+    non-compose project runs behind the *same* boundary — one place to harden."""
+    cmd = ["docker", "run", "--rm", "--read-only",
+           "--tmpfs", "/tmp", "-v", f"{workdir}:/work", "-w", "/work"]
+    if _has_runtime():
+        cmd += ["--runtime", _RUNTIME]
+    if not network:
+        cmd += ["--network", "none"]
+    return [*cmd, image, *argv]
 
 
 @contextlib.asynccontextmanager

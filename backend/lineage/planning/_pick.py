@@ -33,10 +33,13 @@ def _select(creds: list[dict], ollama: str | None) -> tuple[str, str, str | None
 async def light_transport() -> Transport:
     from ..db.tenancy import tenant_conn  # deferred: keeps this importable driver-free
 
+    from ..security import vault  # deferred: keeps the pure _select crypto-free
+
     async with tenant_conn() as c:
         creds = await c.fetch(
             "SELECT model, transport, api_key FROM model_credentials WHERE enabled ORDER BY added_at")
-    model, transport, key = _select([dict(r) for r in creds], _OLLAMA)
+    rows = [{**dict(r), "api_key": vault.open_(r["api_key"])} for r in creds]
+    model, transport, key = _select(rows, _OLLAMA)
     return build_transport(model, transport, key)
 
 

@@ -79,10 +79,10 @@ export default function Agents({ run }: { run?: string }) {
               : <Empty />}
           </ChartCard>
           <ChartCard title="Token attribution" hint="by agent — radius scales with tokens">
-            {charts.token_attr.length ? <Pie slices={charts.token_attr} unit="tokens" /> : <Empty />}
+            {charts.token_attr.some((s) => s.value) ? <Pie slices={charts.token_attr} unit="tokens" /> : <Empty />}
           </ChartCard>
           <ChartCard title="Cost share" hint="by agent — radius scales with spend">
-            {charts.cost_share.length ? <Pie slices={charts.cost_share} unit="$" /> : <Empty />}
+            {charts.cost_share.some((s) => s.value) ? <Pie slices={charts.cost_share} unit="$" /> : <Empty />}
           </ChartCard>
           <ChartCard title="Verification" hint="nodes by outcome">
             {charts.verification.some((s) => s.value) ? <Donut slices={charts.verification} centerLabel="nodes" /> : <Empty />}

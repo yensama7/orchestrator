@@ -320,10 +320,16 @@ async def add_cred(body: CredIn):
     test: dict | None = None
     if body.transport != "api" or effective_key:
         test = await _probe(body.model, body.transport, effective_key)
+    # §P5: seal the key before it touches the DB — a dump/backup/row-log never
+    # carries a usable key. require=True for an api key fails closed rather than
+    # silently storing plaintext when LINEAGE_SECRET_KEY is unset.
+    try:
+        sealed = vault.seal(body.api_key, require=body.transport == "api" and bool(body.api_key))
+    except RuntimeError as e:
+        return {"ok": False, "tested": False, "detail": str(e)}
     async with tenant_conn() as c:
-        # §P5: seal the key before it touches the DB — a dump/backup/row-log never
-        # carries a usable key. COALESCE keeps the stored (sealed) key when the
-        # user edits a row without re-entering it.
+        # COALESCE keeps the stored (sealed) key when the user edits a row
+        # without re-entering it.
         await c.execute(
             """INSERT INTO model_credentials (tenant_id, model, transport, api_key, enabled)
                VALUES (current_setting('app.tenant_id')::uuid, $1,$2,$3,$4)
@@ -331,7 +337,7 @@ async def add_cred(body: CredIn):
                  SET transport=EXCLUDED.transport,
                      api_key=COALESCE(EXCLUDED.api_key, model_credentials.api_key),
                      enabled=EXCLUDED.enabled""",
-            body.model, body.transport, vault.seal(body.api_key), body.enabled)
+            body.model, body.transport, sealed, body.enabled)
     return {"ok": True, "tested": test is not None, **(test or {"detail": "no key to test"})}
 
 

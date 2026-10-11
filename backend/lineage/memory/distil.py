@@ -31,7 +31,9 @@ async def distil(run_id: UUID, name: str, manifest: dict | None = None) -> UUID 
             "SELECT subject, choice FROM semantic_memory WHERE run_id=$1 AND status='active'",
             run_id,
         )
-        roles = await c.fetch("SELECT DISTINCT role FROM agents WHERE run_id=$1", run_id)
+        # roster is tenant-scoped (no run_id column); read it the same way the
+        # orchestrator does. ponytail: matches orchestrator.py's `WHERE enabled`.
+        roles = await c.fetch("SELECT DISTINCT role FROM agents WHERE enabled")
         fp = await c.fetchval("SELECT fingerprint->>'domain' FROM runs WHERE id=$1", run_id)
         summary = "; ".join(f"{d['subject']}={d['choice']}" for d in decisions)
         vec = to_pgvector(await embed(summary or name))

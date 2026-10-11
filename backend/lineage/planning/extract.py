@@ -16,9 +16,12 @@ _DOMAINS = {
     "storefront": ("commerce", "storefront"), "shop": ("commerce", "storefront"),
     "marketplace": ("commerce", "marketplace"), "dashboard": ("saas", "admin"),
     "api": ("api", "service"), "mobile": ("mobile", "app"),
+    "cli": ("tool", "cli"), "command-line": ("tool", "cli"),
+    "script": ("tool", "cli"), "converter": ("tool", "cli"),
 }
 _PAY = ["paystack", "stripe", "flutterwave", "adyen"]
-_STACK = ["nextjs", "react", "postgres", "django", "fastapi", "rails", "go", "rust"]
+_STACK = ["nextjs", "react", "postgres", "django", "fastapi", "rails", "go", "rust",
+          "python", "typescript", "node", "flask"]
 _REGION = {"nigeria": "NG", "nigerian": "NG", "us": "US", "europe": "EU", "eu": "EU"}
 
 _SYS = (
@@ -67,8 +70,14 @@ async def extract(brief: str) -> SpecFingerprint:
         comp = await (await light_transport()).complete(
             Prompt(system=_SYS, user=brief))
         data = json.loads(_json_slice(comp.text))
-        data["domain"] = canon_domain(data.get("domain", ""))  # free reasoning, fixed label
-        return SpecFingerprint(**data)
+        # an echo/fixture stand-in returns a JSON with no real spec (no `domain`);
+        # that's not a fingerprint, so fall back to the keyword heuristic rather
+        # than silently labelling everything 'other'.
+        if not data.get("domain"):
+            return _heuristic(brief)
+        data["domain"] = canon_domain(data["domain"])  # free reasoning, fixed label
+        return SpecFingerprint(**{k: v for k, v in data.items()
+                                  if k in SpecFingerprint.model_fields})
     except Exception:
         return _heuristic(brief)  # CLI missing/unauthed or bad JSON → keyword fallback
 
@@ -108,6 +117,9 @@ def demo() -> None:
     assert fp.domain == "other" and fp.payments is None, fp  # no keyword => not commerce
     fp2 = _heuristic("Nigerian storefront with 2k skus and paystack")
     assert fp2.domain == "commerce" and fp2.payments == "paystack" and fp2.region == "NG", fp2
+    # a Python CLI is a tool, and the stack is detected — not silently 'other'.
+    fp3 = _heuristic("A CLI tool in Python that converts CSV to JSON, with unit tests")
+    assert fp3.domain == "tool" and "python" in fp3.stack_hints, fp3
     assert _json_slice("noise {\"a\":1} tail") == '{"a":1}'
     # a free-thinking model's varied labels collapse to the canonical join key
     assert canon_domain("E-Commerce") == "commerce"

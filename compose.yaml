@@ -32,6 +32,12 @@ services:
       APP_DATABASE_URL: postgres://app:app@db:5432/lineage
       # owner URL, used once on boot to apply the idempotent schema (drift-proof)
       MIGRATE_DATABASE_URL: postgres://lineage:lineage@db:5432/lineage
+      # secret-at-rest key for API keys entered in Settings (§P5, vault.py).
+      # Generate once: `python -m lineage.security.vault --keygen`, then export it
+      # (e.g. in a .env file next to this compose). Without it, storing a real API
+      # key fails closed rather than writing plaintext — fixture/local runs are
+      # unaffected since they need no key.
+      LINEAGE_SECRET_KEY: ${LINEAGE_SECRET_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

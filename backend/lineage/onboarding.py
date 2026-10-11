@@ -55,9 +55,15 @@ async def run_onboarding() -> dict:
     async with tenant_conn() as c:
         r = await c.fetchrow(
             "SELECT mode, status, spent_usd, verified_count FROM runs WHERE id=$1", rid)
+        # the run must have promoted itself into a reusable template — the DB-backed
+        # regression guard for distil (a 100%-reproducible crash the DB-free CI
+        # suite can't see, since distil touches real tables).
+        distilled = await c.fetchval(
+            "SELECT count(*) FROM templates WHERE source_run_id=$1", rid)
     spent, verified = float(r["spent_usd"]), int(r["verified_count"])
     return {"run": str(rid), "mode": r["mode"], "status": r["status"], "spent": spent,
-            "verified": verified, "cost_per_verified": (spent / verified) if verified else None}
+            "verified": verified, "distilled": int(distilled),
+            "cost_per_verified": (spent / verified) if verified else None}
 
 
 def main() -> None:
@@ -72,6 +78,8 @@ def main() -> None:
     print("────────────────────────────────────────────────────")
     if out["mode"] != "live" or out["verified"] == 0:
         raise SystemExit("onboarding did not reach a verified live result")
+    if out["distilled"] == 0:
+        raise SystemExit("onboarding did not distil the run into a template (distil regression)")
     print("A verified build with no API key. Open the console to explore it.")
 
 

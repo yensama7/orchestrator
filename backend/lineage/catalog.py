@@ -7,7 +7,7 @@ from __future__ import annotations
 # transport options per model: 'api' (key), 'subscription' (headless CLI), 'local' (ollama/vllm)
 CATALOG = [
     {"provider": "Anthropic", "key_env": "ANTHROPIC_API_KEY", "cli": "claude", "models": [
-        {"id": "claude-opus-4.6", "label": "Claude Opus 4.6", "transports": ["api", "subscription"]},
+        {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "transports": ["api", "subscription"]},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6", "transports": ["api", "subscription"]},
         {"id": "claude-haiku-4.5", "label": "Claude Haiku 4.5", "transports": ["api", "subscription"]},
     ]},

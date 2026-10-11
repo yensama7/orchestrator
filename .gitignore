@@ -26,3 +26,10 @@ Thumbs.db
 
 # Local reference material, not part of the build
 references/
+.agents/
+.claude/
+.codex/
+.github/
+skills-lock.json
+.playwright-mcp/
+scratchpad/

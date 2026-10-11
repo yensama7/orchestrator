@@ -203,6 +203,11 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster, flags: dict, pool: Sand
         if status == "passed" and node_behavioral:
             await _bump_run_verified(run_id)
 
+        # make what the run actually built browsable in Workspace — a brief-run has
+        # no imported folder, so without this the winner's artifacts are invisible.
+        if status == "passed":
+            await _persist_files(run_id, winner_body.get("files") or {})
+
         # record every passed decision, not a hardcoded three — this is what
         # retrieve() feeds back into later prompts, so the memory has to be real.
         choice = winner_body.get("choice")
@@ -605,6 +610,33 @@ async def _pitfall_count(domain) -> int:
 async def _bump_run_verified(run_id) -> None:
     async with tenant_conn() as c:
         await c.execute("UPDATE runs SET verified_count=verified_count+1 WHERE id=$1", run_id)
+
+
+async def _persist_files(run_id, files: dict) -> None:
+    """Write a passed node's produced artifacts into worktree_files so Workspace
+    can browse them. Upsert by path (a later node re-writing a file wins); the
+    first file materialised for the run opens by default. Path-traversal guarded,
+    same as worktree.materialise."""
+    if not files:
+        return
+    async with tenant_conn() as c:
+        ordinal = int(await c.fetchval(
+            "SELECT count(*) FROM worktree_files WHERE run_id=$1", run_id) or 0)
+        for path, content in files.items():
+            rel = str(path).replace("\\", "/").lstrip("./")
+            if not rel or ".." in rel.split("/"):
+                continue
+            cut = rel.rfind("/")
+            folder, name = (rel[:cut + 1], rel[cut + 1:]) if cut >= 0 else ("", rel)
+            ext = name.rsplit(".", 1)[-1] if "." in name else ""
+            await c.execute(
+                """INSERT INTO worktree_files
+                       (tenant_id, run_id, folder, name, ext, content, ordinal, is_open)
+                   VALUES (current_setting('app.tenant_id')::uuid,$1,$2,$3,$4,$5,$6,$7)
+                   ON CONFLICT (tenant_id, run_id, folder, name)
+                   DO UPDATE SET content=EXCLUDED.content, ext=EXCLUDED.ext""",
+                run_id, folder, name, ext, content or "", ordinal, ordinal == 0)
+            ordinal += 1
 
 
 async def _fold_scores(domain) -> None:

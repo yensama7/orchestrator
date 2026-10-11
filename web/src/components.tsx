@@ -83,101 +83,235 @@ export const Legend = ({ items }: { items: { color: string; label: string }[] })
   </div>
 );
 
+// ── Obsidian-style force graph ──────────────────────────────────────────────
+// A living graph, not a scatter plot: nodes repel, edges pull like springs, the
+// whole thing settles to rest (alpha → 0) and reheats when you grab a node.
+// Drag to pin, scroll to zoom toward the cursor, drag the void to pan. Hovering
+// a node focuses it + its neighbours and fades everything else — the Obsidian
+// "what's connected to this?" read. Incoming x,y (fingerprint coords) seed the
+// layout so similar work starts near, then physics untangles it.
+// ponytail: O(n²) repulsion — fine for tens–hundreds of nodes; Barnes-Hut only
+// if a graph ever pushes past ~500.
+type Sim = { p: Pt; x: number; y: number; vx: number; vy: number; o: number; to: number };
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 export function Scatter({
-  points, edges = [], labels = [], height = 430, onCommit,
+  points, edges = [], height = 430, onCommit,
 }: {
   points: Pt[]; edges?: [string, string][];
-  labels?: { x: number; y: number; text: string }[];
   height?: number; onCommit?: (id: string) => void;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const nodes = useRef<Map<string, Sim>>(new Map());
+  const order = useRef<Sim[]>([]);
+  const cam = useRef({ k: 1, px: 0, py: 0 });
   const hover = useRef<string | null>(null);
+  const alpha = useRef(1);
   const raf = useRef(0);
+  const drag = useRef<{ n: Sim; moved: boolean } | null>(null);
+  const pan = useRef<{ x: number; y: number } | null>(null);
 
-  const draw = () => {
+  // Rebuild sim nodes from props, preserving positions/velocity by id so a data
+  // refresh nudges the layout instead of resetting it.
+  useEffect(() => {
+    const prev = nodes.current;
+    const next = new Map<string, Sim>();
+    points.forEach((p) => {
+      const was = prev.get(p.id);
+      next.set(p.id, was
+        ? { ...was, p }
+        : { p, x: (p.x - 0.5) * 520, y: (p.y - 0.5) * 360, vx: 0, vy: 0, o: 1, to: 1 });
+    });
+    nodes.current = next;
+    order.current = [...next.values()];
+    alpha.current = 1;
+    if (reduceMotion) { for (let i = 0; i < 280; i++) step(); alpha.current = 0; }
+    kick();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [points, edges]);
+
+  const deg = (id: string) => edges.reduce((n, [a, b]) => n + (a === id || b === id ? 1 : 0), 0);
+
+  // One physics tick: link springs, pairwise repulsion, weak centering. Mirrors
+  // d3-force's integrator (velocity decay 0.6, forces scaled by alpha).
+  const step = () => {
+    const ns = order.current, a = alpha.current, byId = nodes.current;
+    for (const [sa, sb] of edges) {
+      const s = byId.get(sa), t = byId.get(sb); if (!s || !t) continue;
+      let dx = t.x - s.x, dy = t.y - s.y;
+      let l = Math.hypot(dx, dy) || 1;
+      const f = ((l - 78) / l) * a * 0.5;
+      dx *= f; dy *= f;
+      t.vx -= dx; t.vy -= dy; s.vx += dx; s.vy += dy;
+    }
+    for (let i = 0; i < ns.length; i++) {
+      const n = ns[i];
+      for (let j = i + 1; j < ns.length; j++) {
+        const m = ns[j];
+        let dx = n.x - m.x, dy = n.y - m.y;
+        let l2 = dx * dx + dy * dy || 1;
+        const w = (150 * a) / l2;
+        n.vx += dx * w; n.vy += dy * w; m.vx -= dx * w; m.vy -= dy * w;
+      }
+      n.vx += -n.x * 0.045 * a; n.vy += -n.y * 0.045 * a;   // centering gravity
+    }
+    for (const n of ns) {
+      if (drag.current?.n === n) { n.vx = n.vy = 0; continue; }
+      n.vx *= 0.6; n.vy *= 0.6; n.x += n.vx; n.y += n.vy;
+    }
+    alpha.current += (0 - a) * 0.0228;
+    if (alpha.current < 0.004) alpha.current = 0;
+  };
+
+  const toScreen = (n: Sim, w: number) => {
+    const c = cam.current;
+    return [w / 2 + c.px + n.x * c.k, height / 2 + c.py + n.y * c.k] as const;
+  };
+
+  const render = () => {
     const cv = ref.current; if (!cv) return;
     const dpr = window.devicePixelRatio || 1;
     const w = cv.clientWidth, h = height;
-    cv.width = w * dpr; cv.height = h * dpr;
-    const ctx = cv.getContext("2d")!; ctx.scale(dpr, dpr); ctx.clearRect(0, 0, w, h);
-    const px = (p: Pt) => [p.x * w, p.y * h] as const;
-    const byId = new Map(points.map((p) => [p.id, p]));
-    const hv = hover.current ? byId.get(hover.current) : null;
+    if (cv.width !== w * dpr || cv.height !== h * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+    const ctx = cv.getContext("2d")!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    const k = cam.current.k;
+
+    const hv = hover.current ? nodes.current.get(hover.current) : null;
     const hot = new Set<string>();
-    if (hv) for (const [a, b] of edges) { if (a === hv.id) hot.add(b); if (b === hv.id) hot.add(a); }
+    if (hv) { hot.add(hv.p.id); for (const [a, b] of edges) { if (a === hv.p.id) hot.add(b); if (b === hv.p.id) hot.add(a); } }
 
-    // grid
-    ctx.strokeStyle = "#1c2334"; ctx.lineWidth = 1;
-    for (let i = 1; i < 10; i++) {
-      ctx.beginPath(); ctx.moveTo((w / 10) * i, 0); ctx.lineTo((w / 10) * i, h); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, (h / 10) * i); ctx.lineTo(w, (h / 10) * i); ctx.stroke();
+    // ease each node's focus opacity toward its target (opacity-only motion)
+    for (const n of order.current) {
+      n.to = n.p.dimmed ? 0.08 : hv ? (hot.has(n.p.id) ? 1 : 0.12) : 1;
+      n.o += (n.to - n.o) * 0.25;
     }
-    ctx.fillStyle = HEX.dimmer; ctx.font = "12px 'JetBrains Mono', monospace";
-    labels.forEach((l) => ctx.fillText(l.text, l.x * w, l.y * h));
 
-    // edges
+    // edges — straight, faint; the hovered node's lie on top, lit amber
     for (const [a, b] of edges) {
-      const pa = byId.get(a), pb = byId.get(b); if (!pa || !pb) continue;
-      const on = hv && (a === hv.id || b === hv.id);
-      ctx.strokeStyle = on ? HEX.amber : "rgba(105,112,138,0.30)";
-      ctx.lineWidth = on ? 1.4 : 1;
-      const [x1, y1] = px(pa), [x2, y2] = px(pb);
-      ctx.beginPath(); ctx.moveTo(x1, y1);
-      ctx.quadraticCurveTo((x1 + x2) / 2, (y1 + y2) / 2 - 0.04 * h, x2, y2); ctx.stroke();
+      const s = nodes.current.get(a), t = nodes.current.get(b); if (!s || !t) continue;
+      const on = hv && hot.has(a) && hot.has(b);
+      const [x1, y1] = toScreen(s, w), [x2, y2] = toScreen(t, w);
+      ctx.globalAlpha = hv ? (on ? 0.9 : 0.05) : 0.22 * Math.min(s.o, t.o);
+      ctx.strokeStyle = on ? HEX.amber : HEX.dimmer;
+      ctx.lineWidth = on ? 1.6 : 1;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     }
+    ctx.globalAlpha = 1;
 
-    // points
-    for (const p of points) {
-      const [x, y] = px(p);
-      const isHover = hv?.id === p.id;
-      const alpha = p.dimmed ? 0.09 : hv && !isHover && !hot.has(p.id) ? 0.92 : 1;
-      ctx.globalAlpha = alpha;
-      const r = isHover ? p.size * 1.5 : p.size;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = hex(p.color); ctx.fill();
-      if (p.ring) { ctx.beginPath(); ctx.arc(x, y, r + 6, 0, Math.PI * 2); ctx.strokeStyle = hex(p.color); ctx.lineWidth = 1.5; ctx.stroke(); }
-      if (isHover) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.strokeStyle = HEX.bone; ctx.lineWidth = 1.3; ctx.stroke(); }
+    // nodes
+    ctx.font = "11px 'Archivo', system-ui, sans-serif"; ctx.textAlign = "center";
+    for (const n of order.current) {
+      const [x, y] = toScreen(n, w);
+      const focus = hv?.p.id === n.p.id;
+      const r = (focus ? n.p.size * 1.35 : n.p.size) * k;
+      ctx.globalAlpha = n.o;
+      if (focus) {   // soft glow behind the focused node
+        ctx.beginPath(); ctx.arc(x, y, r + 7, 0, Math.PI * 2);
+        ctx.fillStyle = hex(n.p.color); ctx.globalAlpha = n.o * 0.18; ctx.fill(); ctx.globalAlpha = n.o;
+      }
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = hex(n.p.color); ctx.fill();
+      if (n.p.ring) { ctx.beginPath(); ctx.arc(x, y, r + 5, 0, Math.PI * 2); ctx.strokeStyle = hex(n.p.color); ctx.lineWidth = 1.5; ctx.stroke(); }
+      if (focus) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.strokeStyle = HEX.bone; ctx.lineWidth = 1.3; ctx.stroke(); }
+      // labels: always for the focus cluster, otherwise once zoomed in
+      if (n.p.name && (hot.has(n.p.id) || k > 1.35) && n.o > 0.2) {
+        ctx.globalAlpha = n.o * (focus || k > 1.35 ? 1 : 0.8);
+        ctx.fillStyle = focus ? HEX.bone : HEX.dim;
+        ctx.fillText(n.p.name, x, y + r + 12);
+      }
       ctx.globalAlpha = 1;
     }
   };
 
-  useEffect(draw, [points, edges, labels, height]);
+  const loop = () => {
+    if (alpha.current > 0) step();
+    render();
+    const fading = !!hover.current || order.current.some((n) => Math.abs(n.o - n.to) > 0.01);
+    if (alpha.current > 0 || drag.current || fading) raf.current = requestAnimationFrame(loop);
+    else raf.current = 0;
+  };
+  const kick = () => { if (!raf.current) raf.current = requestAnimationFrame(loop); };
 
-  const pick = (e: React.MouseEvent): Pt | null => {
-    const cv = ref.current!; const rect = cv.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    let best: Pt | null = null, bd = 13; // flat 13px hit radius
-    for (const p of points) {
-      if (p.dimmed) continue;
-      const d = Math.hypot(p.x * rect.width - mx, p.y * rect.height - my);
-      if (d < bd) { bd = d; best = p; }
+  // on unmount: stop the loop and hide the shared tooltip (navigating away from
+  // a hovered node unmounts the canvas without firing pointerleave).
+  useEffect(() => () => { if (raf.current) cancelAnimationFrame(raf.current); hideTip(); }, []);
+
+  // native non-passive wheel so zoom can preventDefault the page scroll
+  useEffect(() => {
+    const cv = ref.current; if (!cv) return;
+    const h = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = cv.getBoundingClientRect();
+      const sx = e.clientX - rect.left, sy = e.clientY - rect.top, c = cam.current;
+      const wx = (sx - rect.width / 2 - c.px) / c.k, wy = (sy - height / 2 - c.py) / c.k;
+      c.k = Math.max(0.3, Math.min(4, c.k * Math.exp(-e.deltaY * 0.0012)));
+      c.px = sx - rect.width / 2 - wx * c.k; c.py = sy - height / 2 - wy * c.k;
+      kick();
+    };
+    cv.addEventListener("wheel", h, { passive: false });
+    return () => cv.removeEventListener("wheel", h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [height]);
+
+  const atPointer = (e: React.PointerEvent) => {
+    const rect = ref.current!.getBoundingClientRect();
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const c = cam.current;
+    const wx = (sx - rect.width / 2 - c.px) / c.k, wy = (sy - height / 2 - c.py) / c.k;
+    return { sx, sy, wx, wy, w: rect.width };
+  };
+  const pick = (e: React.PointerEvent): Sim | null => {
+    const { sx, sy, w } = atPointer(e);
+    let best: Sim | null = null, bd = Infinity;
+    for (const n of order.current) {
+      if (n.p.dimmed) continue;
+      const [x, y] = toScreen(n, w);
+      const d = Math.hypot(x - sx, y - sy);
+      if (d < Math.max(n.p.size * cam.current.k + 6, 11) && d < bd) { bd = d; best = n; }
     }
     return best;
   };
 
-  const onMove = (e: React.MouseEvent) => {
-    const clientX = e.clientX, clientY = e.clientY;
-    if (raf.current) return;
-    raf.current = requestAnimationFrame(() => {
-      raf.current = 0;
-      const p = pick({ clientX, clientY } as React.MouseEvent);
-      if (p?.id !== hover.current) { hover.current = p?.id ?? null; draw(); }
-      if (p) {
-        const lines: TipLine[] = [{ text: p.name ?? p.id, color: hex(p.color), weight: 600 }];
-        const meta = [p.domain, p.meta?.status, p.meta?.cost != null ? `$${p.meta.cost}` : null]
-          .filter(Boolean).join(" · ");
-        if (meta) lines.push({ text: meta, mono: true, color: HEX.dim });
-        showTip(clientX, clientY, lines);
-      } else hideTip();
-    });
+  const onDown = (e: React.PointerEvent) => {
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    const n = pick(e);
+    if (n) { drag.current = { n, moved: false }; alpha.current = Math.max(alpha.current, 0.3); kick(); }
+    else { const { sx, sy } = atPointer(e); pan.current = { x: sx, y: sy }; }
   };
-
+  const onMove = (e: React.PointerEvent) => {
+    const { sx, sy, wx, wy } = atPointer(e);
+    if (drag.current) {
+      const { n } = drag.current;
+      if (Math.hypot(wx - n.x, wy - n.y) * cam.current.k > 4) drag.current.moved = true;
+      n.x = wx; n.y = wy; n.vx = n.vy = 0;
+      if (!reduceMotion) alpha.current = Math.max(alpha.current, 0.3);
+      kick(); return;
+    }
+    if (pan.current) {
+      cam.current.px += sx - pan.current.x; cam.current.py += sy - pan.current.y;
+      pan.current = { x: sx, y: sy }; kick(); return;
+    }
+    const n = pick(e);
+    if (n?.p.id !== hover.current) { hover.current = n?.p.id ?? null; kick(); }
+    if (n) {
+      const lines: TipLine[] = [{ text: n.p.name ?? n.p.id, color: hex(n.p.color), weight: 600 }];
+      const meta = [n.p.domain, n.p.meta?.status, n.p.meta?.cost != null ? `$${n.p.meta.cost}` : null]
+        .filter(Boolean).join(" · ");
+      if (meta) lines.push({ text: meta, mono: true, color: HEX.dim });
+      showTip(e.clientX, e.clientY, lines);
+    } else hideTip();
+  };
+  const onUp = (e: React.PointerEvent) => {
+    if (drag.current && !drag.current.moved) onCommit?.(drag.current.n.p.id);
+    drag.current = null; pan.current = null;
+    (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
+  };
   return (
     <div className="canvas-wrap">
-      <canvas ref={ref} style={{ height }}
+      <canvas ref={ref} className="graph" style={{ height, touchAction: "none" }}
         tabIndex={0}
-        onMouseMove={onMove}
-        onMouseLeave={() => { hover.current = null; hideTip(); draw(); }}
-        onClick={() => hover.current && onCommit?.(hover.current)} />
+        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+        onPointerLeave={() => { if (!drag.current && !pan.current) { hover.current = null; hideTip(); kick(); } }} />
     </div>
   );
 }

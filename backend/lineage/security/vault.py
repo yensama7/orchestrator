@@ -44,12 +44,19 @@ def configured() -> bool:
     return _cipher() is not None
 
 
-def seal(plaintext: str | None) -> str | None:
-    """Encrypt for storage. No key configured → plaintext (dev). None → None."""
+def seal(plaintext: str | None, *, require: bool = False) -> str | None:
+    """Encrypt for storage. None/"" → unchanged. No key configured → plaintext
+    (dev convenience) — UNLESS `require` is set, in which case storing a real
+    secret with no vault is a hard error (fail closed), never a silent plaintext
+    write. Callers pass require=True for a live API key at the trust boundary."""
     if plaintext is None or plaintext == "":
         return plaintext
     c = _cipher()
     if c is None:
+        if require:
+            raise RuntimeError(
+                "refusing to store an API key in plaintext: set LINEAGE_SECRET_KEY "
+                "(generate one with `python -m lineage.security.vault --keygen`)")
         return plaintext
     return _MARKER + c.encrypt(plaintext.encode()).decode()
 
@@ -73,6 +80,12 @@ def demo() -> None:
     assert seal("sk-abc") == "sk-abc"
     assert open_("sk-abc") == "sk-abc"   # legacy plaintext opens unchanged
     assert seal(None) is None and seal("") == ""
+    # fail closed: a real key with require=True must never be stored plaintext.
+    try:
+        seal("sk-live", require=True)
+        raise AssertionError("must refuse to store a real key with no vault")
+    except RuntimeError:
+        pass
 
     # with a key → round-trips, and the stored form is opaque (not the key).
     from cryptography.fernet import Fernet

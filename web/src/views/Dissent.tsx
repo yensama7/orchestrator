@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useApi, post } from "../api";
-import { Chip, Panel } from "../components";
+import { Chip, EmptyState, Panel } from "../components";
 
 type Dis = {
   leaderboard: {
@@ -54,6 +54,9 @@ export default function Dissent({ run, onForked }: { run?: string; onForked?: ()
   return (
     <div className="stack">
       <div className="section-title">Vindication leaderboard — the roads not taken, and which were right</div>
+      {data.leaderboard.length === 0 ? (
+        <Panel pad><EmptyState message="No dissent yet. When agents disagree on a node, the overruled proposals land here — and the ones that turn out right rise up the board." /></Panel>
+      ) : (
       <div className="leaderboard">
         {data.leaderboard.map((a) => (
           <div className="lb-card" key={a.agent}>
@@ -70,6 +73,7 @@ export default function Dissent({ run, onForked }: { run?: string; onForked?: ()
           </div>
         ))}
       </div>
+      )}
 
       <div className="section-title">The ledger</div>
       <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
@@ -83,6 +87,11 @@ export default function Dissent({ run, onForked }: { run?: string; onForked?: ()
             <tr><th>Node</th><th>Dissenter</th><th>Winner</th><th>Stage</th><th>Reason</th><th>Status</th><th></th></tr>
           </thead>
           <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={7} className="dim" style={{ padding: "14px 10px", textAlign: "center" }}>
+                {filter === "all" ? "No dissenting proposals recorded for this run." : `No ${filter} dissent.`}
+              </td></tr>
+            )}
             {rows.map((r) => (
               <tr key={r.id}>
                 <td className="mono">{r.node}</td>

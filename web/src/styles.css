@@ -191,6 +191,12 @@ button { font-family: var(--ui); cursor: pointer; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .canvas-wrap { position: relative; }
 canvas { display: block; width: 100%; border: 1px solid var(--line); border-radius: 4px; background: #10131f; }
+/* force graph — grabbable void, like Obsidian's canvas */
+canvas.graph {
+  background: radial-gradient(120% 120% at 50% 40%, #141929 0%, #0d1018 100%);
+  cursor: grab; touch-action: none;
+}
+canvas.graph:active { cursor: grabbing; }
 
 /* tables */
 table.data { width: 100%; border-collapse: collapse; font-size: 12.5px; }

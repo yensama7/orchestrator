@@ -34,6 +34,9 @@ class Completion:
     text: str
     usage: Usage = field(default_factory=Usage)
     raw: dict | None = None
+    # True only for the free echo stand-in (no real model ran). Carried up so a
+    # run that touched echo can never be labeled `live` (mode.py, phases.md §P0).
+    simulated: bool = False
 
 
 @dataclass

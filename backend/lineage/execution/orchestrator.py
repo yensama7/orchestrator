@@ -14,7 +14,9 @@ import json
 from uuid import UUID
 
 from ..arbitration.arbiter import Arbiter
+from ..arbitration import confidence
 from ..arbitration.scores import AgentScore, Proposal
+from .. import mode as runmode
 from ..contracts import NodeSpec, SpecFingerprint
 from ..db.tenancy import tenant_conn
 from ..memory import manifest
@@ -26,7 +28,8 @@ from ..memory.retrieval import retrieve
 from ..planning.plan import build_dag
 from ..transports import Prompt, build as build_transport
 from ..transports.base import Completion
-from . import leases, scheduler, verify
+from . import leases, routing, scheduler, verify
+from .pool import SandboxPool
 
 _running: set[str] = set()
 # workspace chunks per run, embedded once at run start (files are static during a
@@ -45,6 +48,7 @@ async def start(run_id: UUID) -> bool:
 
 
 async def _run(run_id: UUID) -> None:
+    pool: SandboxPool | None = None
     try:
         fp, ceiling = await _load(run_id)
         _ws_ctx[str(run_id)] = await _worktree_chunks(run_id)
@@ -55,6 +59,11 @@ async def _run(run_id: UUID) -> None:
             return
         dag = await build_dag(fp, ceiling)
         arb = Arbiter(await _scores(fp.domain))
+        # §P2 routing inputs, snapshotted once so a run routes deterministically
+        # (replay/fork depend on it): per-agent cost-per-verified-result for this
+        # domain, and how often this fingerprint has burned us before.
+        cpv = await _cost_per_verified(fp.domain)
+        prior_failures = await _pitfall_count(fp.domain)
         await _reset_agents()
         await mem.append_episodic(run_id, "ticker", {"key": "planned", "text": f"{len(dag.nodes)} nodes"})
 
@@ -68,8 +77,17 @@ async def _run(run_id: UUID) -> None:
             await mem.append_episodic(run_id, "ticker",
                 {"key": "planned", "text": f"fork — resuming at {fork_node}"})
 
+        # run-level mode evidence (phases.md §P0): echo poisons `live`, a behavioral
+        # verifier is required for it. Nodes mutate this as they run.
+        flags = {"echo": False, "behavioral": False}
         halted = False
-        for level in scheduler.levels(dag):
+        # warm sandbox pool for behavioral verification (§P1b, §14). One sandbox is
+        # handed to each node to execute its proposals' produced files; sized to the
+        # widest level so a parallel level never serialises on sandbox contention.
+        plan_levels = scheduler.levels(dag)
+        pool = SandboxPool(size=max(4, max((len(lv) for lv in plan_levels), default=1)))
+        await pool.start()
+        for level in plan_levels:
             if await _over_ceiling(run_id, ceiling):
                 halted = True
                 await mem.append_episodic(run_id, "ticker",
@@ -80,16 +98,26 @@ async def _run(run_id: UUID) -> None:
                 if order[n.id] < resume_idx:
                     continue  # carried forward from the parent run
                 if fork_node and n.id == fork_node and override:
-                    tasks.append(_apply_override(run_id, n, override))
+                    tasks.append(_apply_override(run_id, n, override, pool))
                 else:
-                    tasks.append(_node(run_id, n, fp, arb, roster))
+                    tasks.append(_node(run_id, n, fp, arb, roster, flags, pool, cpv, prior_failures))
             if tasks:
                 await asyncio.gather(*tasks)
 
         status = "abandoned" if halted else "passed"
+        mode_val = runmode.classify(flags["echo"], flags["behavioral"])
         async with tenant_conn() as c:
             name = await c.fetchval("SELECT name FROM runs WHERE id=$1", run_id)
-            await c.execute("UPDATE runs SET status=$2 WHERE id=$1", run_id, status)
+            await c.execute("UPDATE runs SET status=$2, mode=$3 WHERE id=$1", run_id, status, mode_val)
+        await mem.append_episodic(run_id, "ticker",
+            {"key": "planned", "text": f"mode: {mode_val}"})
+        # §P0: vind% counts only live-run settlements; the mid-run recompute saw
+        # this run's mode still defaulting to 'simulated', so refresh it now that
+        # the final mode is committed. A no-op refresh after a simulated run.
+        if mode_val == runmode.LIVE:
+            await _fold_scores(fp.domain)  # §P2: this run's spend/verified → routing surface
+            for agent in {a["agent"] for lst in roster.values() for a in lst}:
+                await _bump_vind(agent)
         if not halted:
             await mem.append_episodic(run_id, "ticker", {"key": "passed", "text": "run complete"})
             # §5/§17 M5: promote the completed run into a reusable template so the
@@ -106,24 +134,30 @@ async def _run(run_id: UUID) -> None:
     except Exception as e:
         await mem.append_episodic(run_id, "ticker", {"key": "failed", "text": str(e)[:90]})
     finally:
+        if pool is not None:
+            await pool.shutdown()
         _ws_ctx.pop(str(run_id), None)
         _running.discard(str(run_id))
 
 
-async def _node(run_id, node: NodeSpec, fp, arb, roster) -> None:
-    agents = _pick(roster, node)
+async def _node(run_id, node: NodeSpec, fp, arb, roster, flags: dict, pool: SandboxPool,
+                cpv: dict, prior_failures: int) -> None:
+    agents = await _assign(run_id, roster, node, cpv, prior_failures)
     if not agents:
         return
     held = await leases.acquire_all(run_id, node.id, agents[0]["agent"], node.writes, ttl_seconds=90)
     if held is None:
         await mem.append_episodic(run_id, "lease", {"node": node.id, "text": "deferred"})
         return
+    # one warm sandbox for the whole node: behavioral verifiers (verify.py) execute
+    # each proposal's produced files in it, and the resurrect loop re-verifies in it.
+    sb = await pool.acquire()
     try:
         proposals, per_agent = await _propose(run_id, node, fp, agents)
         # §18.3 stage 2: verify every proposal *before* arbitration so a passing
-        # test can beat a vote. Verifiers are pure and cheap (verify.py), so running
-        # them on all proposals is safe; the winner's result is reused as its status.
-        vres = {p.id: await verify.run(node.acceptance, p.body) for p in proposals}
+        # test can beat a vote. Behavioral verifiers execute the produced files;
+        # the winner's result is reused as its status.
+        vres = {p.id: await verify.run(node.acceptance, p.body, sb) for p in proposals}
         for p in proposals:
             p.verifier_passes = vres[p.id].passed
         decision = arb.decide(fp.domain, proposals)
@@ -135,22 +169,38 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster) -> None:
         status = "passed" if vres[winner.id].passed else "failed"
         winner_agent, winner_body = winner.agent, winner.body
 
+        # §P0: pass credit is a *verified-skill* number — it only counts when this
+        # node was behaviorally verified with a real model. A structural pass on an
+        # echo proposal records activity (tokens/cost) but no skill, so a simulated
+        # run can't inflate the Agents/leaderboard surface used for routing.
+        node_behavioral = verify.any_behavioral(node.acceptance)
+        flags["behavioral"] = flags["behavioral"] or node_behavioral
+        flags["echo"] = flags["echo"] or any(u["sim"] for u in per_agent.values())
+
         # commit per-agent usage (tokens/cost/pass) — this is what fills the charts.
         # pass credit is tied to the arbiter's winner attempt, before resurrection.
         for a in agents:
             u = per_agent[a["agent"]]
-            await _bump_agent(a["agent"], u["tokens"], u["cost"], u["cached"],
-                              passed=(a["agent"] == winner.agent and status == "passed"))
+            verified = (a["agent"] == winner.agent and status == "passed"
+                        and node_behavioral and not u["sim"])
+            await _bump_agent(a["agent"], u["tokens"], u["cost"], u["cached"], passed=verified)
         await _charge(run_id, sum(u["cost"] for u in per_agent.values()))
 
         # §8: the winner failed verification → resurrect the highest-ranked dormant
         # dissent for this node and re-verify it. A dissenter that now passes is
         # vindicated (and becomes the effective decision); one that fails is refuted.
         if status == "failed":
-            revived = await _resurrect_and_settle(run_id, node)
+            revived = await _resurrect_and_settle(run_id, node, sb)
             if revived:
                 winner_agent, winner_body = revived
                 status = "passed"
+
+        # §P2: a verified result = a node that reached a behaviorally-verified pass.
+        # Echo can't clear a behavioral gate (verify.py fails it closed), so this
+        # counter is 0 on a pure-echo run without any mode check. Denominator of
+        # the run's cost-per-verified-result.
+        if status == "passed" and node_behavioral:
+            await _bump_run_verified(run_id)
 
         # record every passed decision, not a hardcoded three — this is what
         # retrieve() feeds back into later prompts, so the memory has to be real.
@@ -163,20 +213,33 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster) -> None:
             "node": node.id, "winner": winner_agent, "status": status,
             "stage": decision.stage, "text": f"{node.id} · {winner_agent} · {status}"})
     finally:
+        await pool.release(sb)
         await leases.release(held)
         await _set_state([a["agent"] for a in agents], "idle")
 
 
-def _pick(roster: dict, node: NodeSpec) -> list[dict]:
+async def _assign(run_id, roster: dict, node: NodeSpec, cpv: dict, prior_failures: int) -> list[dict]:
+    """Which agent(s) take this node. Irreversible nodes with >1 role peer still
+    go to full consensus (unchanged). Otherwise the §P2 router picks a single
+    agent by complexity × historical cost-per-verified-result, and logs why —
+    COMPLEXITY_ROUTING=0 falls back to the first candidate (pre-Phase-2 behaviour)."""
     same = roster.get(node.role, [])
     # consensus on any irreversible node where >1 agent shares the role — not just
     # the literal "senior-dev", so a user's own role names get consensus too.
     if node.irreversible and len(same) > 1:
         return same
-    if same:
-        return [same[0]]
-    flat = [a for lst in roster.values() for a in lst]
-    return [flat[0]] if flat else []
+    cands = same or [a for lst in roster.values() for a in lst]
+    if not cands:
+        return []
+    if not routing.enabled():
+        return [cands[0]]
+    needed = routing.node_tier(node, behavioral=verify.behavioral_count(node.acceptance),
+                               prior_failures=prior_failures)
+    chosen = routing.choose(cands, needed, cpv)
+    await mem.append_episodic(run_id, "router", {
+        "node": node.id, "tier": needed, "agent": chosen["agent"], "model": chosen["model"],
+        "text": f"{node.id} → {needed} → {chosen['agent']} ({chosen['model']})"})
+    return [chosen]
 
 
 async def _propose(run_id, node, fp, agents) -> tuple[list[Proposal], dict]:
@@ -189,6 +252,7 @@ async def _propose(run_id, node, fp, agents) -> tuple[list[Proposal], dict]:
             "tokens": comp.usage.input_tokens + comp.usage.output_tokens,
             "cost": comp.usage.usd,
             "cached": (comp.usage.cached_tokens / max(comp.usage.input_tokens, 1) * 100),
+            "sim": comp.simulated,  # echo stand-in → can't count as verified (§P0)
         }
         proposals.append(Proposal(
             id=f"{node.id}:{a['agent']}", agent=a["agent"], body=_body(comp, node),
@@ -220,13 +284,25 @@ async def _dispatch(a: dict, node: NodeSpec, fp: SpecFingerprint, run_id) -> Com
     qvec = await embed(query)
     prior = await _prior_decisions(query)
     chunks = _relevant_workspace(str(run_id), qvec)
+    # §P1b: a node that must be behaviorally verified has to *produce the artifacts*
+    # that get built/tested — tell the model to emit them as a files map. Without
+    # this the loop is inert (nothing to execute). The echo stub ignores it and so
+    # stays honestly `simulated`.
+    contract = (
+        "OUTPUT: return ONLY JSON of the form "
+        '{"choice": "<short decision label>", "confidence": <0..1>, '
+        '"files": {"<relative/path>": "<complete file contents>"}}. '
+        "`files` must contain the full, runnable artifacts implementing this node "
+        "so they can be built and tested — no prose, no placeholders."
+        if node.writes and verify.any_behavioral(node.acceptance) else ""
+    )
     prompt = Prompt(
         # cacheable prefix: identical for every node/agent in the run (domain +
         # file tree), so the provider serves it from cache after the first call.
         stable=_ws_stable(str(run_id), fp.domain),
         # variable tail: role, constraints, retrieved memory, and the chunks that
         # match *this* node — the only part that changes call to call.
-        system="\n".join(x for x in (f"role={node.role}", profile, must_not, prior, chunks) if x),
+        system="\n".join(x for x in (f"role={node.role}", profile, must_not, prior, chunks, contract) if x),
         user=f"node {node.id}: {node.intent} for {fp.subdomain or fp.domain}")
     try:
         return await build_transport(a["model"], a["transport"], a.get("key")).complete(prompt)
@@ -341,13 +417,17 @@ async def _fork_spec(run_id):
     return r["forked_at_node"], ov
 
 
-async def _apply_override(run_id, node: NodeSpec, override: dict) -> None:
+async def _apply_override(run_id, node: NodeSpec, override: dict, pool: SandboxPool) -> None:
     """Install a forked decision at the divergence node without re-proposing —
     the user (or a resurrected dissent) already chose it. Verified for status,
     installed regardless: a fork is 'try this path from here'."""
     body = override["body"] if isinstance(override.get("body"), dict) else override
     agent = override.get("agent") or "fork"
-    vres = await verify.run(node.acceptance, body)
+    sb = await pool.acquire()
+    try:
+        vres = await verify.run(node.acceptance, body, sb)
+    finally:
+        await pool.release(sb)
     status = "passed" if vres.passed else "failed"
     choice = body.get("choice")
     if choice:
@@ -377,11 +457,12 @@ async def _record_dissent(run_id, node_id, proposals, decision) -> None:
     await mem.append_episodic(run_id, "dissent", {"node": node_id, "text": f"{len(losers)} overruled"})
 
 
-async def _resurrect_and_settle(run_id, node: NodeSpec):
+async def _resurrect_and_settle(run_id, node: NodeSpec, sandbox):
     """§8: the winner failed → walk the dormant dissents for this node, highest
-    stage first, re-verifying each stored proposal. First one that passes is
-    vindicated and returned as the effective (agent, body); the rest that get
-    tried and fail are refuted. This is the resurrect/settle loop (§8) over SQL."""
+    stage first, re-verifying each stored proposal (behaviorally, in the node's
+    sandbox). First one that passes is vindicated and returned as the effective
+    (agent, body); the rest that get tried and fail are refuted. This is the
+    resurrect/settle loop (§8) over SQL."""
     async with tenant_conn() as c:
         rows = await c.fetch(
             """SELECT id, dissenter, proposal FROM dissent
@@ -389,7 +470,7 @@ async def _resurrect_and_settle(run_id, node: NodeSpec):
                ORDER BY stage DESC, id ASC""", run_id, node.id)
     for r in rows:
         body = json.loads(r["proposal"]) if isinstance(r["proposal"], str) else (r["proposal"] or {})
-        vres = await verify.run(node.acceptance, body)
+        vres = await verify.run(node.acceptance, body, sandbox)
         outcome = "vindicated" if vres.passed else "refuted"
         async with tenant_conn() as c:
             await c.execute("UPDATE dissent SET status=$2 WHERE id=$1", r["id"], outcome)
@@ -397,6 +478,10 @@ async def _resurrect_and_settle(run_id, node: NodeSpec):
         await mem.append_episodic(run_id, "dissent",
             {"node": node.id, "text": f"{r['dissenter']} resurrected → {outcome}"})
         if vres.passed:
+            # §P3b/§P3c: disprove the MUST NOT this verified alternative beat, and
+            # promote the decision to knowledge if it's now repeatedly vindicated.
+            from ..arbitration.dissent import on_vindicated
+            await on_vindicated(run_id, node.id, body, r["dissenter"], node.constraints)
             return r["dissenter"], body
     return None
 
@@ -464,9 +549,67 @@ async def _load(run_id):
 
 
 async def _scores(domain):
+    """§P3a: the arbiter ranks on confidence-shrunk posteriors, not raw rates.
+    pass_rate shrinks (verified, trials); vindication_rate shrinks each agent's
+    (vindicated, settled) dissents in this domain (live runs only — §P0). Thin
+    samples sit near the prior, so a lucky streak can't outrank a veteran."""
     async with tenant_conn() as c:
         rows = await c.fetch(
-            "SELECT agent, pass_rate, escalation_rate, vindication_rate FROM agent_scores WHERE domain=$1",
+            "SELECT agent, escalation_rate, verified, trials FROM agent_scores WHERE domain=$1",
             domain)
-    return {r["agent"]: AgentScore(pass_rate=r["pass_rate"], escalation_rate=r["escalation_rate"],
-                                   vindication_rate=r["vindication_rate"]) for r in rows}
+        vrows = await c.fetch(
+            """SELECT d.dissenter AS agent,
+                      count(*) FILTER (WHERE d.status='vindicated') AS v,
+                      count(*) FILTER (WHERE d.status IN ('vindicated','refuted')) AS t
+               FROM dissent d JOIN runs r ON r.id = d.run_id
+               WHERE r.mode='live' AND r.fingerprint->>'domain'=$1
+               GROUP BY d.dissenter""", domain)
+    vind = {r["agent"]: (r["v"], r["t"]) for r in vrows}
+    out = {}
+    for r in rows:
+        v, t = vind.get(r["agent"], (0, 0))
+        out[r["agent"]] = AgentScore(
+            pass_rate=confidence.posterior_mean(r["verified"], r["trials"]),
+            escalation_rate=r["escalation_rate"],
+            vindication_rate=confidence.posterior_mean(
+                v, t, prior=confidence.VIND_PRIOR, strength=confidence.VIND_STRENGTH),
+            vindicated=v, overruled=t,
+            cohort=confidence.cohort(r["trials"], domain_trials=r["trials"]))
+    return out
+
+
+# ── §P2: cost-per-verified-result (routing input + run headline) ─────────────
+async def _cost_per_verified(domain) -> dict:
+    """Per-agent spend ÷ verified wins for this domain, from live runs only
+    (agent_scores is fed by `_fold_scores` on live runs). Absent agent = unproven."""
+    async with tenant_conn() as c:
+        rows = await c.fetch(
+            "SELECT agent, spend_usd, verified FROM agent_scores WHERE domain=$1 AND verified>0", domain)
+    return {r["agent"]: float(r["spend_usd"]) / r["verified"] for r in rows}
+
+
+async def _pitfall_count(domain) -> int:
+    """How often this domain's fingerprint has burned us — a complexity input."""
+    async with tenant_conn() as c:
+        return int(await c.fetchval(
+            "SELECT COALESCE(sum(occurrences),0) FROM pitfalls WHERE domain=$1", domain) or 0)
+
+
+async def _bump_run_verified(run_id) -> None:
+    async with tenant_conn() as c:
+        await c.execute("UPDATE runs SET verified_count=verified_count+1 WHERE id=$1", run_id)
+
+
+async def _fold_scores(domain) -> None:
+    """Roll this run's per-agent spend + verified passes (the live `agents` rows,
+    reset per run) into the cross-run cost-per-verified surface. Live runs only
+    (§P0): a simulated run must never shift routing."""
+    async with tenant_conn() as c:
+        await c.execute(
+            """INSERT INTO agent_scores (tenant_id, agent, domain, spend_usd, verified, trials)
+               SELECT tenant_id, agent, $1, cost_usd, passes, attempts FROM agents WHERE calls>0
+               ON CONFLICT (tenant_id, agent, domain) DO UPDATE
+                 SET spend_usd = agent_scores.spend_usd + EXCLUDED.spend_usd,
+                     verified  = agent_scores.verified  + EXCLUDED.verified,
+                     trials    = agent_scores.trials    + EXCLUDED.trials""",
+            domain)

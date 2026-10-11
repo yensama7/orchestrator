@@ -8,6 +8,19 @@ import os
 
 from .base import Budget, Capacity, Completion, Prompt, Transport, Usage
 
+# Cached-input discount for the OpenAI-compatible path. OpenAI bills prompt-cache
+# hits at 0.5× input; DeepSeek/most others are at or below that, so 0.5 is a
+# conservative model (never under-bills) and keeps the Phase-2 cost-per-verified
+# metric honest instead of charging every cached token at full rate (§P2).
+CACHE_DISCOUNT = float(os.getenv("CACHE_DISCOUNT", "0.5"))
+
+
+def openai_usd(pin: float, pout: float, inp: int, out: int, cached: int) -> float:
+    """Input billed as fresh + cached×discount; output at full rate. $/1M rates."""
+    fresh = max(inp - cached, 0)
+    return (fresh * pin + cached * pin * CACHE_DISCOUNT + out * pout) / 1e6
+
+
 # $/1M tokens (in, out) — override via PRICES env for exact billing.
 PRICES = {
     "claude-sonnet-4.6": (3.0, 15.0),
@@ -108,9 +121,9 @@ class ApiTransport(Transport):
                 u = d.get("usage", {})
                 inp, out = u.get("prompt_tokens", 0), u.get("completion_tokens", 0)
                 cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-                # ponytail: cost at full input rate; cached-token discount varies by
-                # provider (OpenAI 0.5×, others differ) — report hits, don't guess price.
-                usd = inp / 1e6 * pin + out / 1e6 * pout
+                # cached input billed at CACHE_DISCOUNT× (§P2) so the cost-per-verified
+                # metric isn't inflated by charging every cache hit at full rate.
+                usd = openai_usd(pin, pout, inp, out, cached)
 
         return Completion(text, Usage(input_tokens=inp, output_tokens=out,
                                       cached_tokens=cached, usd=usd), raw=d)
@@ -128,6 +141,11 @@ def demo() -> None:
         assert _base_url("unknown-model") == "https://api.openai.com/v1"  # safe fallback
         os.environ["OPENAI_BASE_URL"] = "http://proxy:1234/v1"
         assert _base_url("deepseek-v3.2") == "http://proxy:1234/v1"  # override wins
+        # cache discount: a fully-cached call costs less than a fully-fresh one,
+        # and zero cache reproduces the old full-rate number.
+        assert openai_usd(3.0, 15.0, 1000, 0, 0) == 3.0 / 1e6 * 1000
+        assert openai_usd(3.0, 15.0, 1000, 0, 1000) < openai_usd(3.0, 15.0, 1000, 0, 0)
+        assert openai_usd(3.0, 15.0, 1000, 0, 1000) == 1000 * 3.0 * CACHE_DISCOUNT / 1e6
     finally:
         os.environ.pop("OPENAI_BASE_URL", None)
         if old:

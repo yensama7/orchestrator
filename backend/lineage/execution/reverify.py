@@ -123,3 +123,7 @@ async def _quarantine(template_id: UUID, domain: str, log: str) -> None:
                DO UPDATE SET occurrences = pitfalls.occurrences + 1,
                    symptom = excluded.symptom, last_seen_at = now()""",
             signature, domain, f"re-verification build failed: {log.strip()[-240:]}")
+    # §P3c: re-derive hypothesis/knowledge from the new failure count — repeated
+    # verified failure is what earns a pitfall its MUST NOT status.
+    from ..memory import pitfalls as pitfalls_mod
+    await pitfalls_mod.recompute(signature)

@@ -26,8 +26,10 @@ docker compose up --build
 | **Tenancy/RLS** — enabled + **forced**, app connects as `NOBYPASSRLS` role (§18.4) | ✅ isolation verified |
 | Contracts (Pydantic, `extra=forbid` injection defence) | ✅ §20.2 |
 | **Live orchestrator** — DAG walk, consensus arbitration, dissent, verify, leases | ✅ §17 M1+consensus |
+| **Verifies behavior** (runs the produced code: build/test/lint) | ❌ **no (M1)** — verifiers are structural only; lands in Phase 1 |
+| **Run mode** — every run tagged `simulated`/`live`; a simulated run can't earn verified-skill credit | ✅ §P0 truth-in-labeling, self-checked |
 | Deterministic five-stage arbiter | ✅ real + self-checked, §18.3 |
-| Dissent ledger (record / resurrect / settle, all over SQL) | ✅ real, populated by real runs, §8 |
+| Dissent ledger (record / resurrect / settle, all over SQL) | ✅ real, populated by live runs, §8 |
 | **Dissent rollback** — one-click Resurrect (settle in place) + Fork from any dissent | ✅ real, §8/§19.7 |
 | **Replay & forking** — fork a run at any node, carry prior decisions + worktree, re-run | ✅ real, §16.5 |
 | **Template drift** — nightly sweep (npm/PyPI/OSV), re-verify stale, quarantine + pitfall | ✅ real + self-checked, §18.2 |
@@ -66,7 +68,11 @@ Everything runs offline with sensible fallbacks; these get *better*, not
 
 - **Real model calls** — set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (metered) or
   install the headless CLIs (subscription). Without them the local echo runs
-  every node for free, so the loop still completes.
+  every node for free, so the loop still completes — but any run that touched the
+  echo is tagged **`simulated`** (see the header badge) and cannot earn
+  verified-skill credit or feed a benchmark. A run only becomes **`live`** once a
+  real model *and* a behavioral verifier gate it (behavioral verifiers land in
+  Phase 1, so today every run is honestly `simulated`).
 - **Real embeddings** — set `EMBED_URL` to a text-embeddings-inference server
   (BGE-M3, §15). The local hashed embedder is deterministic but semantically
   weak by design; it exists so the retrieval pipeline runs with no GPU.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from ..memory import pitfalls as pitfalls_mod
 from ..memory.embed import embed, to_pgvector
 from .tenancy import DEFAULT_TENANT, tenant_conn
 
@@ -91,10 +92,14 @@ async def seed() -> None:
                 prev = row["id"]
 
         for fp, symptom, resolution, cost, occ in _PITFALLS:
+            # §P3c: a seeded pitfall carries its earned status — occurrences≥FLOOR
+            # is knowledge (gates plans), a one-off stays a hypothesis.
+            status = "knowledge" if pitfalls_mod.is_knowledge(occ, 0) else "hypothesis"
             await c.execute(
                 """INSERT INTO pitfalls (tenant_id, fingerprint, domain, trigger, symptom,
-                       resolution, cost_usd, occurrences, first_run_id, last_seen_at, embedding)
-                   VALUES ($1,$2,'commerce','{}'::jsonb,$3,$4,$5,$6,$7,now(),$8)
+                       resolution, cost_usd, occurrences, first_run_id, last_seen_at, embedding,
+                       status, confidence)
+                   VALUES ($1,$2,'commerce','{}'::jsonb,$3,$4,$5,$6,$7,now(),$8,$9,$10)
                    ON CONFLICT DO NOTHING""",
                 T, fp, symptom, resolution, cost, occ, RUN_UUID,
-                to_pgvector(await embed(symptom)))
+                to_pgvector(await embed(symptom)), status, pitfalls_mod.confidence(occ, 0))

@@ -34,13 +34,16 @@ def _domain(fp) -> str:
 
 async def run_header(c, run_id) -> dict:
     r = await c.fetchrow(
-        """SELECT r.name, r.spent_usd, r.ceiling_usd, r.status, t.name AS tmpl
+        """SELECT r.name, r.spent_usd, r.ceiling_usd, r.status, r.mode, r.verified_count,
+                  t.name AS tmpl
            FROM runs r LEFT JOIN templates t ON t.id = r.template_id WHERE r.id=$1""", run_id)
     agents = await c.fetch(
         "SELECT agent, cost_usd, tokens, cached_pct, state FROM agents ORDER BY ordinal")
     if r is None:  # no current run (empty db) — render an empty header, not a 500
         idle = sum(1 for a in agents if a["state"] == "idle")
-        return {"id": "—", "label": "—", "spec": "no active run", "template": "—", "spent": 0.0,
+        return {"id": "—", "label": "—", "spec": "no active run", "template": "—",
+                "mode": "simulated", "spent": 0.0,
+                "verified_count": 0, "cost_per_verified": None,
                 "projected": 0.0, "ceiling": 0.0,
                 "rail": [{"label": "remaining", "usd": 0.0, "color": "ink3"}],
                 "cache_note": "no active run — start one from New run",
@@ -63,9 +66,14 @@ async def run_header(c, run_id) -> dict:
     cache_note = (f"{cache_pct}% of input tokens served from cache" if total_tok
                   else "no model calls yet — add a model in Settings")
     idle = sum(1 for a in agents if a["state"] == "idle")
+    # §P2 headline: cost per verified result. None until a node clears a behavioral
+    # gate — an honest "nothing verified yet" rather than a divide-by-zero or a 0.
+    verified = int(r["verified_count"] or 0)
     return {
         "id": str(run_id), "label": _short(run_id), "spec": r["name"], "template": r["tmpl"] or "—",
-        "spent": round(spent, 2),
+        "mode": r["mode"], "spent": round(spent, 2),
+        "verified_count": verified,
+        "cost_per_verified": round(spent / verified, 2) if verified else None,
         "projected": round(min(ceiling, spent * 1.4) if spent else 0, 2),
         "ceiling": round(ceiling, 2), "rail": rail, "cache_note": cache_note,
         "navfoot": {"egress": "egress deny-all",

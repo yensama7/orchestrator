@@ -7,13 +7,17 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AgentScore:
-    """Per agent×domain, derived from verified outcomes (§9)."""
+    """Per agent×domain, derived from verified outcomes (§9). `pass_rate` and
+    `vindication_rate` are confidence-shrunk posteriors, not raw rates (§P3a) —
+    see arbitration/confidence.py. `cohort` (new|experienced|specialist) labels
+    the sample depth behind them."""
 
     pass_rate: float = 0.0
     escalation_rate: float = 0.0
     vindication_rate: float = 0.0
     overruled: int = 0
     vindicated: int = 0
+    cohort: str = "new"
 
 
 @dataclass

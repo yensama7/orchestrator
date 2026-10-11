@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS runs (
   fingerprint  jsonb NOT NULL,
   template_id  uuid,
   status       text NOT NULL DEFAULT 'active',   -- active|passed|failed|abandoned
+  mode         text NOT NULL DEFAULT 'simulated'  -- simulated|live (§P0 truth-in-labeling)
+               CHECK (mode IN ('simulated','live')),
   spent_usd    numeric NOT NULL DEFAULT 0,
+  verified_count int NOT NULL DEFAULT 0,  -- nodes that reached a behaviorally-verified pass (§P2)
   ceiling_usd  numeric NOT NULL DEFAULT 0,
   is_current   boolean NOT NULL DEFAULT false,   -- the run the console defaults to
   created_at   timestamptz NOT NULL DEFAULT now()
@@ -32,6 +35,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS runs_one_current ON runs (tenant_id) WHERE is_
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS forked_from    uuid REFERENCES runs(id);
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS forked_at_node text;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS fork_override  jsonb;
+-- §P0: an older volume predates run modes; backfill as simulated (the honest
+-- default — nothing before Phase 1 verified behavior).
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'simulated';
+-- §P2: cost-per-verified-result = spent_usd / verified_count (the headline metric).
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS verified_count int NOT NULL DEFAULT 0;
 
 -- ── episodic: what happened, append-only (§5) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS episodic_events (
@@ -114,6 +122,18 @@ CREATE TABLE IF NOT EXISTS pitfalls (
   embedding     vector(1024)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS pitfall_dedupe ON pitfalls (tenant_id, fingerprint);
+-- §P3c: a pitfall is an evidence-weighted hypothesis, not a permanent ban.
+-- `disproofs` counts verified alternatives that beat its MUST NOT; `confidence`
+-- is the Beta-Binomial posterior (memory/pitfalls.py); `status` gates plans —
+-- only `knowledge` is injected as a hard constraint (plan.build_dag). Backfill
+-- an older volume: a pitfall seen ≥3× is knowledge, a one-off stays a hypothesis
+-- (so a single fluke no longer poisons every future DAG).
+ALTER TABLE pitfalls ADD COLUMN IF NOT EXISTS disproofs  int  NOT NULL DEFAULT 0;
+ALTER TABLE pitfalls ADD COLUMN IF NOT EXISTS confidence real;
+ALTER TABLE pitfalls ADD COLUMN IF NOT EXISTS status     text NOT NULL DEFAULT 'hypothesis'
+  CHECK (status IN ('hypothesis', 'knowledge'));
+UPDATE pitfalls SET status = 'knowledge'
+  WHERE status = 'hypothesis' AND occurrences >= 3;
 
 -- ── leases: pessimistic per-file backstop (§18.1) ───────────────────────────
 CREATE TABLE IF NOT EXISTS file_leases (
@@ -159,8 +179,18 @@ CREATE TABLE IF NOT EXISTS agent_scores (
   vindication_rate real NOT NULL DEFAULT 0,
   overruled        int NOT NULL DEFAULT 0,
   vindicated       int NOT NULL DEFAULT 0,
+  -- §P2: cost-per-verified-result per agent×domain, fed only by `live` runs so a
+  -- simulated run can never shift routing. spend_usd / NULLIF(verified,0).
+  spend_usd        numeric NOT NULL DEFAULT 0,
+  verified         int NOT NULL DEFAULT 0,
   PRIMARY KEY (tenant_id, agent, domain)
 );
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS spend_usd numeric NOT NULL DEFAULT 0;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS verified  int NOT NULL DEFAULT 0;
+-- §P3a: `trials` is cumulative attempts (verified ⊆ trials). Confidence-aware
+-- scoring shrinks pass_rate = posterior_mean(verified, trials) toward the prior
+-- on thin samples, so a 5/5 rookie can't outrank a 950/1000 veteran.
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS trials int NOT NULL DEFAULT 0;
 
 -- ── UI-backing entities (runtime roster, worktree, precomputed telemetry) ────
 CREATE TABLE IF NOT EXISTS agents (

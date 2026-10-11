@@ -1,6 +1,8 @@
-"""Local transport — Ollama/vLLM (§4). Zero marginal cost; ~40% of calls should
-land here. Falls back to a deterministic echo so the orchestrator runs with no
-model server present (routing/fingerprint/summary shaped output)."""
+"""Local transport — Ollama/vLLM (§4). Zero marginal cost, so the §P2 router
+sends cheap/trivial nodes here when a local model is configured — by complexity
+× proven cost-per-verified-result, not a fixed quota. Falls back to a
+deterministic echo so the orchestrator runs with no model server present
+(routing/fingerprint/summary shaped output)."""
 
 from __future__ import annotations
 
@@ -34,10 +36,12 @@ class LocalTransport(Transport):
                 return Completion(text, Usage(
                     input_tokens=data.get("prompt_eval_count", 0),
                     output_tokens=data.get("eval_count", 0), usd=0.0), raw=data)
-        # echo: deterministic structured stand-in, free
+        # echo: deterministic structured stand-in, free — flagged simulated so the
+        # orchestrator can never label a run that used it `live` (mode.py).
         text = json.dumps({"choice": _echo_choice(prompt.user), "confidence": 0.6})
         return Completion(text, Usage(input_tokens=len(prompt.user) // 4,
-                                      output_tokens=len(text) // 4, usd=0.0))
+                                      output_tokens=len(text) // 4, usd=0.0),
+                          simulated=True)
 
     def capacity(self) -> Capacity:
         return Capacity(limit=self._concurrency, unit="slots")

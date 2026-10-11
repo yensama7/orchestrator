@@ -124,13 +124,13 @@ def health():
 async def list_runs():
     async with tenant_conn() as c:
         rows = await c.fetch(
-            "SELECT id, name, status, spent_usd, is_current, created_at FROM runs "
+            "SELECT id, name, status, mode, spent_usd, is_current, created_at FROM runs "
             "ORDER BY created_at DESC, name")
         current = await _current_run(c)
     return {
         "current": str(current),
         "runs": [{"id": str(r["id"]), "name": r["name"], "status": r["status"],
-                  "spent": round(float(r["spent_usd"]), 2),
+                  "mode": r["mode"], "spent": round(float(r["spent_usd"]), 2),
                   "current": r["id"] == current} for r in rows],
     }
 
@@ -181,13 +181,19 @@ async def dissent(run: str | None = None):
         rows = await c.fetch(
             """SELECT id, node_id AS node, dissenter, winner, stage, reason, status
                FROM dissent WHERE run_id=$1 ORDER BY created_at DESC, id DESC LIMIT 60""", rid)
+        # §P0: the leaderboard is a verified-skill ranking (its `promote` flag
+        # feeds routing), so it counts only dissents from `live` runs. The per-run
+        # ledger below is unfiltered — the resurrect/settle demo stays fully
+        # visible there, scoped by the run's mode badge.
         board = await c.fetch(
-            """SELECT dissenter AS agent,
+            """SELECT d.dissenter AS agent,
                       count(*) AS overruled,
-                      count(*) FILTER (WHERE status='resurrected') AS resurrected,
-                      count(*) FILTER (WHERE status='vindicated') AS vindicated,
-                      count(*) FILTER (WHERE status='refuted') AS refuted
-               FROM dissent GROUP BY dissenter ORDER BY vindicated DESC""")
+                      count(*) FILTER (WHERE d.status='resurrected') AS resurrected,
+                      count(*) FILTER (WHERE d.status='vindicated') AS vindicated,
+                      count(*) FILTER (WHERE d.status='refuted') AS refuted
+               FROM dissent d JOIN runs r ON r.id = d.run_id
+               WHERE r.mode='live'
+               GROUP BY d.dissenter ORDER BY vindicated DESC""")
         models = {r["agent"]: r["model"] for r in await c.fetch("SELECT agent, model FROM agents")}
     leaderboard = [{
         "agent": b["agent"], "model": models.get(b["agent"], "—"),

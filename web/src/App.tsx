@@ -11,7 +11,7 @@ import Workspace from "./views/Workspace";
 import SettingsView from "./views/Settings";
 
 type RunData = {
-  id: string; label: string; spec: string; template: string;
+  id: string; label: string; spec: string; template: string; mode: string;
   spent: number; projected: number; ceiling: number;
   rail: { label: string; usd: number; color: string }[];
   cache_note: string;
@@ -19,7 +19,7 @@ type RunData = {
 };
 type RunsList = {
   current: string;
-  runs: { id: string; name: string; status: string; spent: number; current: boolean }[];
+  runs: { id: string; name: string; status: string; mode: string; spent: number; current: boolean }[];
 };
 
 const VIEWS = [
@@ -106,11 +106,12 @@ function Header({ run, runs, selectedRun, onSelectRun, spent, stale, onNewRun }:
             title="Switch run">
             {runs.runs.map((r) => (
               <option key={r.id} value={r.id}>
-                {r.name} · {r.status}{r.current ? " · current" : ""}
+                {r.name} · {r.status} · {r.mode}{r.current ? " · current" : ""}
               </option>
             ))}
           </select>
         ) : <span className="runid">{run?.label}</span>}
+        {run?.mode && <ModeBadge mode={run.mode} />}
         <span className="spec">
           {run?.spec} · inherited from <a href="#">{run?.template}</a>
         </span>
@@ -139,5 +140,20 @@ function Header({ run, runs, selectedRun, onSelectRun, spent, stale, onNewRun }:
         <span className="cache">{run?.cache_note}</span>
       </div>
     </header>
+  );
+}
+
+// §P0 truth-in-labeling: every chart/number on screen belongs to a run; this
+// badge tells a reviewer at a glance whether it's a verified (live) outcome or a
+// simulated one (echo stubs + structural verifiers). Until Phase 1, always sim.
+function ModeBadge({ mode }: { mode: string }) {
+  const live = mode === "live";
+  return (
+    <span className={"mode-badge" + (live ? " live" : " simulated")}
+          title={live
+            ? "live — real model + behavioral verifier; counts toward scoring/benchmarks"
+            : "simulated — echo stub and/or structural verifiers only; not a verified outcome"}>
+      {live ? "live" : "simulated"}
+    </span>
   );
 }

@@ -12,6 +12,9 @@ from ..memory.retrieval import TOP_K
 
 CYCLE = ["amber", "violet", "sage", "steel", "rust"]
 STATUS_COLOR = {"passed": "sage", "active": "amber", "failed": "rust", "abandoned": "rust"}
+# template freshness → map colour (§18.2): quarantined renders rust, a record of
+# something that used to work and no longer does.
+TMPL_COLOR = {"fresh": "violet", "drifting": "amber", "stale": "steel", "quarantined": "rust"}
 
 
 def _short(run_id) -> str:
@@ -73,8 +76,9 @@ async def run_header(c, run_id) -> dict:
 
 async def lineage_graph(c, run_id) -> dict:
     runs = await c.fetch(
-        "SELECT id, name, fingerprint, status, spent_usd, template_id FROM runs")
-    tmpls = await c.fetch("SELECT id, name, domain, embedding FROM templates")
+        "SELECT id, name, fingerprint, status, spent_usd, template_id, forked_from FROM runs")
+    tmpls = await c.fetch(
+        "SELECT id, name, domain, embedding, status, drift_score, source_run_id FROM templates")
 
     points, edges = [], []
     for r in runs:
@@ -89,13 +93,21 @@ async def lineage_graph(c, run_id) -> dict:
         })
         if r["template_id"]:
             edges.append([str(r["id"]), str(r["template_id"])])
+        if r["forked_from"]:
+            edges.append([str(r["id"]), str(r["forked_from"])])  # fork → parent (§16.5)
     for t in tmpls:
         vec = _vec(t["embedding"])
         x, y = project(vec) if vec else (0.5, 0.5)
         points.append({"id": str(t["id"]), "kind": "template", "name": t["name"],
-                       "x": x, "y": y, "size": 11, "color": "violet",
+                       "x": x, "y": y, "size": 11,
+                       "color": TMPL_COLOR.get(t["status"], "violet"),
                        "domain": t["domain"], "ring": False,
-                       "meta": {"status": "template"}})
+                       "meta": {"status": t["status"],
+                                "drift": round(float(t["drift_score"] or 0), 2)}})
+        # the template descends from its source run (§1) — draw that edge so the
+        # map shows provenance both ways (runs also point up to inherited templates).
+        if t["source_run_id"]:
+            edges.append([str(t["id"]), str(t["source_run_id"])])
 
     domains = ["all domains"] + sorted({p["domain"] for p in points if p["kind"] == "run"})
 

@@ -5,7 +5,7 @@ bringing the stack up (see README). No framework, no fixtures."""
 from lineage.arbitration import arbiter
 from lineage.contracts import Envelope, Intent
 from lineage.execution import runner, scheduler
-from lineage.memory import embed
+from lineage.memory import drift, embed, manifest, registry
 from lineage.planning import _pick, extract
 from lineage.security import broker, egress, scan, taint
 from lineage.transports import api as api_transport
@@ -15,6 +15,9 @@ def test_arbiter(): arbiter.demo()
 def test_run_gate(): runner.demo()
 def test_scheduler(): scheduler.demo()
 def test_embed(): embed.demo()
+def test_manifest(): manifest.demo()
+def test_registry(): registry.demo()
+def test_drift(): drift.demo()
 def test_egress(): egress.demo()
 def test_taint(): taint.demo()
 def test_broker(): broker.demo()

@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS runs (
 -- can't pick "current" — an explicit flag does. At most one current run per tenant.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS is_current boolean NOT NULL DEFAULT false;
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_current ON runs (tenant_id) WHERE is_current;
+-- deterministic replay + forking (§16.5): a fork is a run that diverges from a
+-- parent at one node, carrying that run's earlier decisions and worktree and
+-- re-running from the divergence with the decision at that node overridden.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS forked_from    uuid REFERENCES runs(id);
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS forked_at_node text;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS fork_override  jsonb;
 
 -- ── episodic: what happened, append-only (§5) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS episodic_events (
@@ -87,6 +93,11 @@ CREATE TABLE IF NOT EXISTS templates (
   embedding            vector(1024),
   created_at           timestamptz NOT NULL DEFAULT now()
 );
+-- a template descends from exactly one run (§1); dedupe so re-running a run
+-- repins its template instead of spawning a new one. NULL = seed/global template.
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS source_run_id uuid;
+CREATE UNIQUE INDEX IF NOT EXISTS template_one_per_run
+  ON templates (source_run_id) WHERE source_run_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS pitfalls (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),

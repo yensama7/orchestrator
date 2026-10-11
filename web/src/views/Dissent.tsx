@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { useApi } from "../api";
+import { useQueryClient } from "@tanstack/react-query";
+import { useApi, post } from "../api";
 import { Chip, Panel } from "../components";
 
 type Dis = {
@@ -7,16 +8,46 @@ type Dis = {
     agent: string; model: string; rate: number;
     overruled: number; resurrected: number; vindicated: number; refuted: number; promote: boolean;
   }[];
-  ledger: { node: string; dissenter: string; winner: string; stage: number; reason: string; status: string }[];
+  ledger: { id: string; node: string; dissenter: string; winner: string; stage: number; reason: string; status: string }[];
 };
+
+type Resurrected = { ok: boolean; outcome?: string; reason?: string };
 
 const STATUS_COLOR: Record<string, string> = {
   dormant: "var(--dimmer)", resurrected: "var(--violet)", vindicated: "var(--sage)", refuted: "var(--rust)",
 };
 
-export default function Dissent({ run }: { run?: string }) {
+export default function Dissent({ run, onForked }: { run?: string; onForked?: () => void }) {
   const { data } = useApi<Dis>("dissent", run);
+  const qc = useQueryClient();
   const [filter, setFilter] = useState<string>("all");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function resurrect(id: string) {
+    setBusy(id);
+    try {
+      const res = await post<Resurrected>(`/api/dissent/${id}/resurrect`);
+      // settling a dissent moves vindication + may rewrite a decision, so refresh
+      // the ledger, the leaderboard's source, and the memory views it feeds.
+      ["dissent", "agents", "memory", "lineage", "charts"].forEach((k) =>
+        qc.invalidateQueries({ queryKey: run ? [k, run] : [k] }));
+      if (!res.ok) alert(`Could not resurrect: ${res.reason ?? "unknown"}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function fork(id: string) {
+    setBusy(id);
+    try {
+      const res = await post<{ ok: boolean; run?: string; reason?: string }>(`/api/dissent/${id}/fork`);
+      if (res.ok) onForked?.();          // the fork is now server-current — follow it
+      else alert(`Could not fork: ${res.reason ?? "unknown"}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   if (!data) return null;
   const rows = data.ledger.filter((r) => filter === "all" || r.status === filter);
 
@@ -53,7 +84,7 @@ export default function Dissent({ run }: { run?: string }) {
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.node + r.dissenter}>
+              <tr key={r.id}>
                 <td className="mono">{r.node}</td>
                 <td className="mono">{r.dissenter}</td>
                 <td className="mono dim">{r.winner}</td>
@@ -64,7 +95,20 @@ export default function Dissent({ run }: { run?: string }) {
                     <span className="dot" style={{ background: STATUS_COLOR[r.status] }} />{r.status}
                   </span>
                 </td>
-                <td>{r.status === "dormant" && <button className="btn ghost" style={{ padding: "2px 8px" }}>Resurrect</button>}</td>
+                <td>{r.status === "dormant" && (
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button className="btn ghost" style={{ padding: "2px 8px" }}
+                            disabled={busy === r.id} onClick={() => resurrect(r.id)}
+                            title="Re-verify and install this proposal in place">
+                      {busy === r.id ? "…" : "Resurrect"}
+                    </button>
+                    <button className="btn ghost" style={{ padding: "2px 8px" }}
+                            disabled={busy === r.id} onClick={() => fork(r.id)}
+                            title="Fork the run from this node using this proposal">
+                      Fork
+                    </button>
+                  </span>
+                )}</td>
               </tr>
             ))}
           </tbody>

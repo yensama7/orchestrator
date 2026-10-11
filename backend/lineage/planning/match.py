@@ -10,6 +10,8 @@ from ..db.tenancy import tenant_conn
 from ..memory.embed import embed, to_pgvector
 
 _OUTCOME = {"passed": "sage", "active": "amber", "failed": "rust", "abandoned": "rust"}
+# cosine-distance penalty by template freshness (§18.2). fresh = no penalty.
+_DRIFT_PENALTY = {"fresh": 0.0, "drifting": 0.15, "stale": 0.30}
 
 
 async def match(fp: SpecFingerprint, k: int = 4) -> dict:
@@ -20,11 +22,17 @@ async def match(fp: SpecFingerprint, k: int = 4) -> dict:
         # it on the fly for ranking (cheap at this scale).
         runs = await c.fetch(
             "SELECT id, name, status, fingerprint FROM runs WHERE fingerprint <> '{}'::jsonb")
-        tmpl = await c.fetchrow(
+        # §18.2: never offer a quarantined template; down-weight a drifting/stale
+        # one so a comparable fresh template wins. Penalty is added to cosine
+        # distance, so lower is still better.
+        cands = await c.fetch(
             """SELECT name, status, node_count, carried_decisions, roles,
                       (embedding <=> $1) AS dist
-               FROM templates WHERE embedding IS NOT NULL
-               ORDER BY embedding <=> $1 LIMIT 1""", vec)
+               FROM templates
+               WHERE embedding IS NOT NULL AND status <> 'quarantined'
+               ORDER BY embedding <=> $1 LIMIT 5""", vec)
+        tmpl = min(cands, key=lambda t: float(t["dist"]) + _DRIFT_PENALTY.get(t["status"], 0.0),
+                   default=None)
         pitfalls = await c.fetchval(
             "SELECT count(*) FROM pitfalls WHERE domain = $1", fp.domain)
 

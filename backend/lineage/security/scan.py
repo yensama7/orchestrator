@@ -44,8 +44,8 @@ async def _gitleaks(text: str) -> list[str]:
 
 def demo() -> None:
     import asyncio as a
-    clean = a.get_event_loop().run_until_complete(scan("nothing to see here"))
-    dirty = a.get_event_loop().run_until_complete(scan("key AKIAIOSFODNN7EXAMPLE oops"))
+    clean = a.run(scan("nothing to see here"))
+    dirty = a.run(scan("key AKIAIOSFODNN7EXAMPLE oops"))
     assert clean == [] and dirty  # fails closed on a real secret
     print("scan.demo ok")
 

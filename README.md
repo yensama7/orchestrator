@@ -28,6 +28,9 @@ docker compose up --build
 | **Live orchestrator** — DAG walk, consensus arbitration, dissent, verify, leases | ✅ §17 M1+consensus |
 | Deterministic five-stage arbiter | ✅ real + self-checked, §18.3 |
 | Dissent ledger (record / resurrect / settle, all over SQL) | ✅ real, populated by real runs, §8 |
+| **Dissent rollback** — one-click Resurrect (settle in place) + Fork from any dissent | ✅ real, §8/§19.7 |
+| **Replay & forking** — fork a run at any node, carry prior decisions + worktree, re-run | ✅ real, §16.5 |
+| **Template drift** — nightly sweep (npm/PyPI/OSV), re-verify stale, quarantine + pitfall | ✅ real + self-checked, §18.2 |
 | Roles — user-defined, central agent researches skills/resources into prompts | ✅ real, `/api/roles` + Settings panel, §3 |
 | Multi-run — every New Run is a distinct run; switch/view any from the header | ✅ real, `is_current` + `?run=`, §16 |
 | Transports — API (metered), subscription (headless CLI), local (Ollama/echo) | ✅ §4, §20.3 |
@@ -90,8 +93,10 @@ backend/lineage/
   transports/    base · api · subscription · local  (§4)
   planning/      extract · match · roster · plan     (§3)
   execution/     scheduler · leases · verify · pool · runner · orchestrator
-  arbitration/   arbiter · scores                    (§8, §18.3)
-  memory/        embed · retrieval · store · supersede · distil  (§5, §20.7)
+                 · worktree · reverify · fork         (§16.5, §18.2)
+  arbitration/   arbiter · scores · dissent           (§8, §18.3, §20.6)
+  memory/        embed · retrieval · store · supersede · distil
+                 · manifest · registry · drift        (§5, §18.2, §20.7)
   security/      broker · taint · egress · scan       (§11)
   db/            schema.sql · tenancy · seed          (§18.4)
   api/           main (routes + SSE)

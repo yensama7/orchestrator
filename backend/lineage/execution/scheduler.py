@@ -38,6 +38,18 @@ def levels(dag: Dag) -> list[list[NodeSpec]]:
     return out
 
 
+def resume_plan(order: list[str], from_node: str | None) -> tuple[int, list[str]]:
+    """Fork / replay (§16.5): given the DAG's node ids in walk order and a
+    divergence node, return (resume_index, carried_subjects). Nodes before the
+    divergence are carried from the parent run; a node's subject is its id's
+    first dotted segment ('schema.design' → 'schema'). An unknown or absent
+    divergence resumes at 0 and carries nothing — a full re-run."""
+    if not from_node or from_node not in order:
+        return 0, []
+    idx = order.index(from_node)
+    return idx, sorted({order[i].split(".")[0] for i in range(idx)})
+
+
 def demo() -> None:
     from ..contracts import Dag, NodeSpec
     dag = Dag(nodes=[
@@ -49,6 +61,13 @@ def demo() -> None:
     # a and b don't conflict → same level; c waits on a
     assert {n.id for n in lv[0]} == {"a", "b"}
     assert lv[1][0].id == "c"
+
+    # resume_plan (§16.5)
+    order = ["plan", "schema.design", "auth.session", "api.orders"]
+    assert resume_plan(order, "auth.session") == (2, ["plan", "schema"])
+    assert resume_plan(order, "plan") == (0, [])          # fork at first node
+    assert resume_plan(order, None) == (0, [])            # plain run
+    assert resume_plan(order, "ghost") == (0, [])         # unknown node → full re-run
     print("scheduler.demo ok")
 
 

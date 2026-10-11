@@ -15,6 +15,9 @@ ALLOWLIST: dict[str, list[str]] = {
     "security-analyst": [],          # analysis only, no egress
     "reflection": [],
     "devops": ["registry-1.docker.io", "*.docker.io"],
+    # the drift job (§18.2) reads public registries to compare pinned versions
+    # against latest, and OSV for advisories. Read-only, keyless, no token cost.
+    "drift": ["registry.npmjs.org", "pypi.org", "api.osv.dev"],
 }
 
 

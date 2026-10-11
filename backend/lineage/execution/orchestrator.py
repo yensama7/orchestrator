@@ -17,8 +17,11 @@ from ..arbitration.arbiter import Arbiter
 from ..arbitration.scores import AgentScore, Proposal
 from ..contracts import NodeSpec, SpecFingerprint
 from ..db.tenancy import tenant_conn
+from ..memory import manifest
 from ..memory import store as mem
+from ..memory.distil import distil
 from ..memory.embed import embed
+from . import worktree
 from ..memory.retrieval import retrieve
 from ..planning.plan import build_dag
 from ..transports import Prompt, build as build_transport
@@ -55,6 +58,16 @@ async def _run(run_id: UUID) -> None:
         await _reset_agents()
         await mem.append_episodic(run_id, "ticker", {"key": "planned", "text": f"{len(dag.nodes)} nodes"})
 
+        # fork / replay (§16.5): resume from the divergence node, skip nodes whose
+        # decisions were carried from the parent, install the override at it.
+        fork_node, override = await _fork_spec(run_id)
+        node_ids = [n.id for n in dag.nodes]
+        order = {nid: i for i, nid in enumerate(node_ids)}
+        resume_idx, _ = scheduler.resume_plan(node_ids, fork_node)
+        if fork_node:
+            await mem.append_episodic(run_id, "ticker",
+                {"key": "planned", "text": f"fork — resuming at {fork_node}"})
+
         halted = False
         for level in scheduler.levels(dag):
             if await _over_ceiling(run_id, ceiling):
@@ -62,13 +75,34 @@ async def _run(run_id: UUID) -> None:
                 await mem.append_episodic(run_id, "ticker",
                     {"key": "blocked", "text": f"ceiling ${ceiling:.2f} reached — run halted"})
                 break
-            await asyncio.gather(*(_node(run_id, n, fp, arb, roster) for n in level))
+            tasks = []
+            for n in level:
+                if order[n.id] < resume_idx:
+                    continue  # carried forward from the parent run
+                if fork_node and n.id == fork_node and override:
+                    tasks.append(_apply_override(run_id, n, override))
+                else:
+                    tasks.append(_node(run_id, n, fp, arb, roster))
+            if tasks:
+                await asyncio.gather(*tasks)
 
         status = "abandoned" if halted else "passed"
         async with tenant_conn() as c:
+            name = await c.fetchval("SELECT name FROM runs WHERE id=$1", run_id)
             await c.execute("UPDATE runs SET status=$2 WHERE id=$1", run_id, status)
         if not halted:
             await mem.append_episodic(run_id, "ticker", {"key": "passed", "text": "run complete"})
+            # §5/§17 M5: promote the completed run into a reusable template so the
+            # next run's `match` can inherit from it. Gated + idempotent in distil;
+            # off the critical path, so a failure here never fails the run.
+            try:
+                man = manifest.parse(await worktree.read_files(run_id))
+                if await distil(run_id, name or "untitled run", man):
+                    await mem.append_episodic(run_id, "ticker",
+                        {"key": "planned", "text": "distilled → template"})
+            except Exception as e:  # noqa: BLE001
+                await mem.append_episodic(run_id, "ticker",
+                    {"key": "held", "text": f"distil skipped: {str(e)[:60]}"})
     except Exception as e:
         await mem.append_episodic(run_id, "ticker", {"key": "failed", "text": str(e)[:90]})
     finally:
@@ -295,6 +329,36 @@ def _body(comp: Completion, node: NodeSpec) -> dict:
     return {"choice": comp.text.strip()[:60] or node.intent, "confidence": 0.6}
 
 
+async def _fork_spec(run_id):
+    """(fork node, override body) for a forked run, else (None, None) (§16.5)."""
+    async with tenant_conn() as c:
+        r = await c.fetchrow(
+            "SELECT forked_at_node, fork_override FROM runs WHERE id=$1", run_id)
+    if not r or not r["forked_at_node"]:
+        return None, None
+    ov = r["fork_override"]
+    ov = json.loads(ov) if isinstance(ov, str) else ov
+    return r["forked_at_node"], ov
+
+
+async def _apply_override(run_id, node: NodeSpec, override: dict) -> None:
+    """Install a forked decision at the divergence node without re-proposing —
+    the user (or a resurrected dissent) already chose it. Verified for status,
+    installed regardless: a fork is 'try this path from here'."""
+    body = override["body"] if isinstance(override.get("body"), dict) else override
+    agent = override.get("agent") or "fork"
+    vres = await verify.run(node.acceptance, body)
+    status = "passed" if vres.passed else "failed"
+    choice = body.get("choice")
+    if choice:
+        subject = node.id.split(".")[0]
+        await mem.write_semantic(run_id, subject, f"{subject} = {choice}",
+                                 rationale=f"fork override at {node.id}", decided_by=agent)
+    await mem.append_episodic(run_id, "node", {
+        "node": node.id, "winner": agent, "status": status, "stage": 0,
+        "text": f"{node.id} · {agent} · {status} (fork override)"})
+
+
 async def _record_dissent(run_id, node_id, proposals, decision) -> None:
     winner_agent = next((x.agent for x in proposals if x.id == decision.winner), proposals[0].agent)
     losers = [(e.agent, e.stage, e.reason, next((p for p in proposals if p.id == e.proposal_id), None))
@@ -338,15 +402,10 @@ async def _resurrect_and_settle(run_id, node: NodeSpec):
 
 
 async def _bump_vind(agent: str) -> None:
-    """Recompute an agent's vindication rate from its settled dissents — the
-    Agents-table 'Vind' column and the dissent leaderboard both read this."""
-    async with tenant_conn() as c:
-        row = await c.fetchrow(
-            """SELECT count(*) FILTER (WHERE status='vindicated') AS v,
-                      count(*) FILTER (WHERE status IN ('vindicated','refuted')) AS t
-               FROM dissent WHERE dissenter=$1""", agent)
-        pct = (row["v"] / row["t"] * 100) if row["t"] else None
-        await c.execute("UPDATE agents SET vind_pct=$2 WHERE agent=$1", agent, pct)
+    """Recompute an agent's vindication rate — shared with the manual-resurrect
+    path (arbitration/dissent.py) so both triggers compute it identically."""
+    from ..arbitration.dissent import recompute_vindication
+    await recompute_vindication(agent)
 
 
 # ── live state mutation on the shared agents rows ───────────────────────────

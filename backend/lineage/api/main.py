@@ -15,11 +15,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import catalog
+from ..arbitration import dissent as dissent_ops
 from ..contracts import SpecFingerprint
 from ..db import seed
 from ..db.tenancy import close, migrate, tenant_conn
+from ..execution import fork as fork_mod
 from ..execution import orchestrator
+from ..execution import reverify as reverify_mod
 from ..execution import runner as runner_mod
+from ..execution import worktree as worktree_mod
+from ..memory import drift as drift_mod
 from ..transports import Budget, Prompt, build as build_transport
 from ..planning import extract as extract_mod
 from ..planning import match as match_mod
@@ -59,6 +64,25 @@ async def _make_current(c, run_id: UUID) -> None:
     await c.execute("UPDATE runs SET is_current=true WHERE id=$1", run_id)
 
 
+async def _drift_loop():
+    """Periodic template freshness sweep (§18.2): recompute every template's
+    drift against the registries, then re-verify whatever went stale. Entirely
+    off the critical path — a failure is swallowed and retried next tick, it
+    never touches a user's run. Disable with DRIFT_SWEEP=0."""
+    interval = int(os.getenv("DRIFT_INTERVAL_SECONDS", "86400"))
+    await asyncio.sleep(int(os.getenv("DRIFT_INITIAL_DELAY_SECONDS", "120")))
+    while True:
+        try:
+            summary = await drift_mod.sweep()
+            if summary["stale_ids"]:
+                await reverify_mod.reverify_all(summary["stale_ids"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — background job must survive its own errors
+            pass
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # wait for db, then seed demo substrate only if explicitly asked
@@ -75,7 +99,10 @@ async def lifespan(app: FastAPI):
     await migrate()  # idempotent — brings a stale volume up to the current schema
     if os.getenv("LINEAGE_SEED") == "1":
         await seed.seed()
+    drift_task = asyncio.create_task(_drift_loop()) if os.getenv("DRIFT_SWEEP", "1") != "0" else None
     yield
+    if drift_task:
+        drift_task.cancel()
     await close()
 
 
@@ -152,7 +179,7 @@ async def dissent(run: str | None = None):
     async with tenant_conn() as c:
         rid = await _resolve(c, run)
         rows = await c.fetch(
-            """SELECT node_id AS node, dissenter, winner, stage, reason, status
+            """SELECT id, node_id AS node, dissenter, winner, stage, reason, status
                FROM dissent WHERE run_id=$1 ORDER BY created_at DESC, id DESC LIMIT 60""", rid)
         board = await c.fetch(
             """SELECT dissenter AS agent,
@@ -169,7 +196,45 @@ async def dissent(run: str | None = None):
         "vindicated": b["vindicated"], "refuted": b["refuted"],
         "promote": (b["overruled"] and b["vindicated"] / b["overruled"] > 0.5),
     } for b in board]
-    return {"leaderboard": leaderboard, "ledger": [dict(r) for r in rows]}
+    return {"leaderboard": leaderboard,
+            "ledger": [{**dict(r), "id": str(r["id"])} for r in rows]}
+
+
+@app.post("/api/dissent/{dissent_id}/resurrect")
+async def resurrect_dissent(dissent_id: str):
+    """§8/§19.7: user-triggered instant rollback to a minority opinion. Re-verifies
+    the dormant proposal, settles it, credits vindication, and — if it passes —
+    installs it as the active decision for its node."""
+    try:
+        did = UUID(dissent_id)
+    except ValueError:
+        return {"ok": False, "reason": "bad_id"}
+    return await dissent_ops.resurrect(did)
+
+
+# ── replay / forking (§16.5) ─────────────────────────────────────────────────
+class ForkIn(BaseModel):
+    from_node: str
+    override: dict | None = None  # {choice: ...} or {agent, body}; None = plain replay
+
+
+@app.post("/api/runs/{run_id:path}/fork")
+async def fork_run(run_id: str, body: ForkIn):
+    """Fork a run at a node, re-running from there with the decision at that node
+    overridden (or re-run unchanged when override is null — deterministic replay)."""
+    async with tenant_conn() as c:
+        rid = await _resolve(c, run_id)
+    return await fork_mod.create(rid, body.from_node, body.override)
+
+
+@app.post("/api/dissent/{dissent_id}/fork")
+async def fork_dissent(dissent_id: str):
+    """One-click fork from a dormant dissent, using its minority proposal (§19.7)."""
+    try:
+        did = UUID(dissent_id)
+    except ValueError:
+        return {"ok": False, "reason": "bad_id"}
+    return await fork_mod.from_dissent(did)
 
 
 # ── settings: catalog, credentials, agents ──────────────────────────────────
@@ -464,20 +529,9 @@ async def run_compose(run_id: str):
     wires runner.py into the live path — previously it had no caller."""
     async with tenant_conn() as c:
         rid = await _resolve(c, run_id)
-        files = await c.fetch(
-            "SELECT folder, name, content FROM worktree_files WHERE run_id=$1 ORDER BY ordinal", rid)
-    if not files:
+    wt = await worktree_mod.materialise(rid, prefix="lineage-run-")
+    if wt is None:
         return {"started": False, "reason": "empty_worktree"}
-    import tempfile
-    from pathlib import Path
-    wt = Path(tempfile.mkdtemp(prefix="lineage-run-"))
-    for f in files:
-        rel = (f["folder"] + f["name"]).replace("\\", "/").lstrip("./")
-        if ".." in rel.split("/"):
-            continue  # never let an imported path escape the temp worktree
-        dest = wt / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(f["content"] or "", encoding="utf-8")
     g = runner_mod.gate(wt)
     if not g.ready:
         return {"started": False, "reason": g.reason,
@@ -487,6 +541,44 @@ async def run_compose(run_id: str):
     except FileNotFoundError:
         return {"started": False, "reason": "docker_missing", "worktree": str(wt)}
     return {"started": True, "file": g.file, "worktree": str(wt)}
+
+
+# ── templates: freshness / drift (§18.2) ─────────────────────────────────────
+@app.get("/api/templates")
+async def list_templates():
+    async with tenant_conn() as c:
+        rows = await c.fetch(
+            """SELECT id, name, domain, version, status, drift_score, node_count,
+                      carried_decisions, source_run_id, freshness_checked_at, reverified_at
+               FROM templates ORDER BY created_at DESC""")
+    return {"templates": [{
+        "id": str(r["id"]), "name": r["name"], "domain": r["domain"],
+        "version": r["version"], "status": r["status"],
+        "drift": round(float(r["drift_score"] or 0), 3),
+        "nodes": r["node_count"], "decisions": r["carried_decisions"],
+        "source_run": str(r["source_run_id"]) if r["source_run_id"] else None,
+        "checked_at": r["freshness_checked_at"].isoformat() if r["freshness_checked_at"] else None,
+        "reverified_at": r["reverified_at"].isoformat() if r["reverified_at"] else None,
+    } for r in rows]}
+
+
+@app.post("/api/templates/drift")
+async def run_drift_sweep():
+    """Recompute freshness for every template now, then re-verify what went
+    stale. Normally runs on a timer (§18.2); this is the manual trigger."""
+    summary = await drift_mod.sweep()
+    reverified = (await reverify_mod.reverify_all(summary["stale_ids"])
+                  if summary["stale_ids"] else {})
+    return {"summary": summary, "reverified": reverified}
+
+
+@app.post("/api/templates/{template_id}/reverify")
+async def reverify_template(template_id: str):
+    try:
+        tid = UUID(template_id)
+    except ValueError:
+        return {"ok": False, "reason": "bad_id"}
+    return {"ok": True, "outcome": await reverify_mod.reverify(tid)}
 
 
 @app.get("/api/runs/{run_id:path}/stream")

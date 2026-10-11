@@ -42,7 +42,8 @@ export default function App() {
   const { events, spent, stale } = useStream(run?.id ?? "current");
   const liveSpent = spent ?? run?.spent ?? 0;
 
-  // after a New Run starts, that run becomes server-current — follow it and refresh.
+  // after a New Run (or a fork) starts, that run becomes server-current — follow
+  // it and refresh.
   const afterNewRun = () => {
     setSelectedRun(null);
     qc.invalidateQueries();
@@ -73,7 +74,7 @@ export default function App() {
         {view === "lineage" && <Lineage run={run?.id} />}
         {view === "memory" && <Memory run={run?.id} />}
         {view === "agents" && <Agents run={run?.id} />}
-        {view === "dissent" && <Dissent run={run?.id} />}
+        {view === "dissent" && <Dissent run={run?.id} onForked={afterNewRun} />}
         {view === "workspace" && <Workspace run={run?.id} />}
         {view === "settings" && <SettingsView />}
       </main>

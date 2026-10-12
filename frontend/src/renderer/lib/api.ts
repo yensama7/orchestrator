@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import type { GetKey } from "../../api/client";
 
 // Ported verbatim from web/src/api.ts (Phase 3) — the data layer is unchanged;
 // only the presentation moves to shadcn/Tailwind.
@@ -18,7 +19,10 @@ export const post = async <T = any,>(path: string, body?: unknown): Promise<T> =
 
 // `run` scopes per-run reads to a selected run (omit for run-independent ones
 // like catalog/settings). It's part of the queryKey so switching runs refetches.
-export const useApi = <T,>(key: string, run?: string) =>
+// `key` is constrained to GET endpoints the backend actually exposes (minus the
+// `/api/` prefix), so a typo'd endpoint fails typecheck. `T` stays explicit while
+// call sites are migrated to the inferred `apiGet` client (Phase 5, incremental).
+export const useApi = <T, K extends GetKey = GetKey>(key: K, run?: string) =>
 	useQuery<T>({
 		queryKey: run ? [key, run] : [key],
 		queryFn: () => get(`/api/${key}${run ? `?run=${encodeURIComponent(run)}` : ""}`),

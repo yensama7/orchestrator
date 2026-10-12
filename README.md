@@ -92,6 +92,11 @@ populated by what you configure and run.
 Everything runs offline with sensible fallbacks; these get *better*, not
 *enabled*, with config:
 
+- **OpenRouter (one key, every model)** — set `OPENROUTER_API_KEY` once (env, or
+  on any one OpenRouter row in Settings) and bind agents to any OpenRouter model.
+  Settings shows a curated handful plus OpenRouter's full live catalogue
+  (`OPENROUTER_DISCOVER=0` to skip the fetch). Cost is read back from OpenRouter
+  per call, so the spend rail stays honest without per-model price tables.
 - **Real model calls** — set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (metered) or
   install the headless CLIs (subscription). Without them the local echo runs
   every node for free, so the loop still completes — but any run that touched the

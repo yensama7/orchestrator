@@ -15,6 +15,7 @@ import { Route as ShellAgentsRouteImport } from './routes/_shell.agents'
 import { Route as ShellDissentRouteImport } from './routes/_shell.dissent'
 import { Route as ShellLineageRouteImport } from './routes/_shell.lineage'
 import { Route as ShellMemoryRouteImport } from './routes/_shell.memory'
+import { Route as ShellNewrunRouteImport } from './routes/_shell.newrun'
 import { Route as ShellSettingsRouteImport } from './routes/_shell.settings'
 import { Route as ShellWorkspaceRouteImport } from './routes/_shell.workspace'
 import { Route as ShellRunRunIdRouteImport } from './routes/_shell.run.$runId'
@@ -48,6 +49,11 @@ const ShellMemoryRoute = ShellMemoryRouteImport.update({
   path: '/memory',
   getParentRoute: () => ShellRoute,
 } as any)
+const ShellNewrunRoute = ShellNewrunRouteImport.update({
+  id: '/newrun',
+  path: '/newrun',
+  getParentRoute: () => ShellRoute,
+} as any)
 const ShellSettingsRoute = ShellSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -70,6 +76,7 @@ export interface FileRoutesByFullPath {
   '/dissent': typeof ShellDissentRoute
   '/lineage': typeof ShellLineageRoute
   '/memory': typeof ShellMemoryRoute
+  '/newrun': typeof ShellNewrunRoute
   '/settings': typeof ShellSettingsRoute
   '/workspace': typeof ShellWorkspaceRoute
   '/run/$runId': typeof ShellRunRunIdRoute
@@ -79,6 +86,7 @@ export interface FileRoutesByTo {
   '/dissent': typeof ShellDissentRoute
   '/lineage': typeof ShellLineageRoute
   '/memory': typeof ShellMemoryRoute
+  '/newrun': typeof ShellNewrunRoute
   '/settings': typeof ShellSettingsRoute
   '/workspace': typeof ShellWorkspaceRoute
   '/': typeof ShellIndexRoute
@@ -91,6 +99,7 @@ export interface FileRoutesById {
   '/_shell/dissent': typeof ShellDissentRoute
   '/_shell/lineage': typeof ShellLineageRoute
   '/_shell/memory': typeof ShellMemoryRoute
+  '/_shell/newrun': typeof ShellNewrunRoute
   '/_shell/settings': typeof ShellSettingsRoute
   '/_shell/workspace': typeof ShellWorkspaceRoute
   '/_shell/': typeof ShellIndexRoute
@@ -104,6 +113,7 @@ export interface FileRouteTypes {
     | '/dissent'
     | '/lineage'
     | '/memory'
+    | '/newrun'
     | '/settings'
     | '/workspace'
     | '/run/$runId'
@@ -113,6 +123,7 @@ export interface FileRouteTypes {
     | '/dissent'
     | '/lineage'
     | '/memory'
+    | '/newrun'
     | '/settings'
     | '/workspace'
     | '/'
@@ -124,6 +135,7 @@ export interface FileRouteTypes {
     | '/_shell/dissent'
     | '/_shell/lineage'
     | '/_shell/memory'
+    | '/_shell/newrun'
     | '/_shell/settings'
     | '/_shell/workspace'
     | '/_shell/'
@@ -178,6 +190,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellMemoryRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/_shell/newrun': {
+      id: '/_shell/newrun'
+      path: '/newrun'
+      fullPath: '/newrun'
+      preLoaderRoute: typeof ShellNewrunRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/_shell/settings': {
       id: '/_shell/settings'
       path: '/settings'
@@ -207,6 +226,7 @@ interface ShellRouteChildren {
   ShellDissentRoute: typeof ShellDissentRoute
   ShellLineageRoute: typeof ShellLineageRoute
   ShellMemoryRoute: typeof ShellMemoryRoute
+  ShellNewrunRoute: typeof ShellNewrunRoute
   ShellSettingsRoute: typeof ShellSettingsRoute
   ShellWorkspaceRoute: typeof ShellWorkspaceRoute
   ShellIndexRoute: typeof ShellIndexRoute
@@ -218,6 +238,7 @@ const ShellRouteChildren: ShellRouteChildren = {
   ShellDissentRoute: ShellDissentRoute,
   ShellLineageRoute: ShellLineageRoute,
   ShellMemoryRoute: ShellMemoryRoute,
+  ShellNewrunRoute: ShellNewrunRoute,
   ShellSettingsRoute: ShellSettingsRoute,
   ShellWorkspaceRoute: ShellWorkspaceRoute,
   ShellIndexRoute: ShellIndexRoute,

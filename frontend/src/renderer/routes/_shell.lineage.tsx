@@ -1,6 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ViewPlaceholder } from "@/components/ViewPlaceholder";
+import { Lineage } from "@/components/views/Lineage";
 
-export const Route = createFileRoute("/_shell/lineage")({
-	component: () => <ViewPlaceholder name="Lineage" />,
-});
+export const Route = createFileRoute("/_shell/lineage")({ component: Lineage });

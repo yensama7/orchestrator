@@ -1,7 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useUiStore } from "@/stores/ui-store";
+import { SimpleRun } from "@/components/views/SimpleRun";
 import { ViewPlaceholder } from "@/components/ViewPlaceholder";
 
-// Board in Expert, Simple summary in Simple mode — branch lands in Phase 3/4.
-export const Route = createFileRoute("/_shell/")({
-	component: () => <ViewPlaceholder name="Board" />,
-});
+// Simple mode → the brief→progress→result summary. Expert mode → the Board,
+// which lands in Phase 4; until then a placeholder keeps the route runnable.
+function Index() {
+	const mode = useUiStore((s) => s.mode);
+	return mode === "simple" ? <SimpleRun /> : <ViewPlaceholder name="Board" />;
+}
+
+export const Route = createFileRoute("/_shell/")({ component: Index });

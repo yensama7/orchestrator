@@ -5,15 +5,21 @@ import {
 	FolderGit2,
 	GitBranch,
 	LayoutDashboard,
+	Plus,
 	Scale,
 	Settings,
 	type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useRun } from "@/hooks/use-run";
+import { useRunStore } from "@/stores/run-store";
+import { useUiStore } from "@/stores/ui-store";
+import { ModeBadge } from "@/components/ModeBadge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 // Nav mirrors the old App.tsx VIEWS, with Board replacing "New run" as the
-// landing. Wired to the router via <Link> (Phase 2); `to` paths match the
-// file-based routes under routes/_shell.*.
+// landing. Wired to the router via <Link>; `to` paths match the file-based
+// routes under routes/_shell.*.
 //
 // ponytail: skipped the shadcn `sidebar` primitive (collapsible rail + mobile
 // Sheet + cookie persistence). Static rail here; add it when collapse/mobile
@@ -29,12 +35,29 @@ export const NAV_ITEMS: { to: string; label: string; icon: LucideIcon }[] = [
 ];
 
 export function Sidebar() {
+	const mode = useUiStore((s) => s.mode);
+	const { run, runs } = useRun();
+	const selectedRun = useRunStore((s) => s.selectedRun);
+	const setSelectedRun = useRunStore((s) => s.setSelectedRun);
+
 	return (
 		<aside className="flex h-full w-56 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
 			<div className="flex h-12 items-center gap-2 px-4">
 				<span className="size-2 rounded-full bg-primary" aria-hidden />
 				<span className="text-sm font-semibold tracking-tight">Lineage</span>
 			</div>
+
+			{mode === "expert" && (
+				<div className="px-2 pb-2">
+					<Link
+						to="/newrun"
+						className="flex h-8 items-center gap-2 rounded-md border border-border px-2.5 text-sm text-foreground transition-colors hover:bg-interactive-hover"
+					>
+						<Plus className="size-4 shrink-0" aria-hidden />
+						New run
+					</Link>
+				</div>
+			)}
 
 			<nav className="flex flex-1 flex-col gap-0.5 px-2 py-2">
 				{NAV_ITEMS.map(({ to, label, icon: Icon }) => (
@@ -54,10 +77,44 @@ export function Sidebar() {
 				))}
 			</nav>
 
-			{/* Project / run section — live data lands in Phase 3. */}
-			<div className="border-t border-border px-4 py-3 text-xs text-muted-foreground">
-				<div className="font-medium text-foreground">No run selected</div>
-				<div className="mt-0.5">Start a run to see it here.</div>
+			{/* Project / run section — live run switcher + mode + spec + security footer. */}
+			<div className="border-t border-border px-3 py-3 text-xs">
+				{runs && runs.runs.length > 0 ? (
+					<Select
+						value={selectedRun ?? runs.current}
+						onValueChange={(v) => setSelectedRun(v === runs.current ? null : v)}
+					>
+						<SelectTrigger size="sm" className="w-full">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{runs.runs.map((r) => (
+								<SelectItem key={r.id} value={r.id}>
+									{r.name} · {r.status} · {r.mode}
+									{r.current ? " · current" : ""}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				) : (
+					<div className="font-medium text-foreground">{run?.label ?? "No run selected"}</div>
+				)}
+
+				{run && (
+					<>
+						<div className="mt-2 flex items-center gap-2">
+							<ModeBadge mode={run.mode} />
+							<span className="truncate text-muted-foreground" title={run.spec}>
+								{run.spec}
+							</span>
+						</div>
+						<div className="mt-2 space-y-0.5 font-mono text-[10.5px] leading-relaxed text-passive">
+							<div>{run.navfoot.egress}</div>
+							<div>{run.navfoot.agents}</div>
+							<div>{run.navfoot.blocked}</div>
+						</div>
+					</>
+				)}
 			</div>
 		</aside>
 	);

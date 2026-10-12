@@ -1,6 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ViewPlaceholder } from "@/components/ViewPlaceholder";
+import { Memory } from "@/components/views/Memory";
 
-export const Route = createFileRoute("/_shell/memory")({
-	component: () => <ViewPlaceholder name="Memory" />,
-});
+export const Route = createFileRoute("/_shell/memory")({ component: Memory });

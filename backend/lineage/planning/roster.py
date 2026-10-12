@@ -13,7 +13,7 @@ DEFAULTS = {
     "frontend": ("kimi-k2", "api"),
     "security": ("claude-sonnet-4.6", "subscription"),
     "security-analyst": ("gemini-3-pro", "subscription"),
-    "reflection": ("qwen3-4b", "local"),
+    "reflection": ("qwen2.5:3b", "local"),
 }
 
 

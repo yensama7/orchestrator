@@ -43,7 +43,7 @@ services:
       # has no stored credential, ApiTransport falls back to this env var. Put it
       # in a .env next to this compose: OPENROUTER_API_KEY=sk-or-...
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      # Local models (Ollama). Defaults to the opt-in `ollama` service below;
+      # Local models (Ollama). Defaults to the always-on `ollama` service below;
       # point it at a host Ollama (http://host.docker.internal:11434) if you run
       # your own. Unset/unreachable → the free echo stand-in, so nothing breaks.
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
@@ -69,16 +69,22 @@ services:
       backend:
         condition: service_healthy
 
-  # Local-model runtime. Starts with the default `docker compose up`; the
-  # Settings → Local models panel detects it, lists/pulls models, and the §P2
-  # router can send cheap nodes here at zero marginal cost. No models are pulled
-  # until you download one, so an idle Ollama is cheap.
+  # Local-model runtime. Always on — the default fingerprinting model
+  # (qwen2.5:3b) is the planner's local default (_pick.py), so the system uses a
+  # real model out of the box. The app containers don't depend on it, so a slow
+  # first-boot model download never blocks the console; fingerprinting falls back
+  # to the heuristic until the model is ready, then auto-upgrades.
   ollama:
     image: ollama/ollama:latest
     volumes:
       - ollama:/root/.ollama
     ports:
       - "11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     # NVIDIA GPU passthrough: needs the nvidia-container-toolkit on the host.
     # Uncomment to use a GPU; Ollama runs CPU-only without it (smaller models).
     # deploy:
@@ -86,6 +92,21 @@ services:
     #     reservations:
     #       devices:
     #         - { driver: nvidia, count: all, capabilities: [gpu] }
+
+  # One-shot: pulls the default fingerprinting model into the shared `ollama`
+  # volume once the server is healthy, then exits. Idempotent — Ollama skips the
+  # download if the model is already in the volume, so every `up` after the first
+  # is instant. Reuses the server image, so no extra image to pull. Download more
+  # models later from Settings → Local models; this one is always present.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["ollama", "pull", "qwen2.5:3b"]
+    restart: "no"
 
 volumes:
   pgdata:

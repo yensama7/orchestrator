@@ -42,7 +42,7 @@ CATALOG = [
     ]},
     {"provider": "Alibaba", "key_env": "DASHSCOPE_API_KEY", "models": [
         {"id": "qwen3-72b", "label": "Qwen3 72B", "transports": ["api", "local"]},
-        {"id": "qwen3-4b", "label": "Qwen3 4B", "transports": ["local"]},
+        {"id": "qwen3:4b", "label": "Qwen3 4B", "transports": ["local"]},
         {"id": "qwen3-coder", "label": "Qwen3 Coder", "transports": ["api", "local"]},
     ]},
     {"provider": "OpenRouter", "key_env": "OPENROUTER_API_KEY", "models": [
@@ -145,7 +145,7 @@ ROLE_PRESETS = [
 # is the on-disk download, approximate.
 LOCAL_MODELS = [
     {"id": "qwen2.5-coder:1.5b", "label": "Qwen2.5 Coder 1.5B", "size_gb": 1.0, "min_vram_gb": 0, "use": "code · CPU-friendly"},
-    {"id": "llama3.2:3b",        "label": "Llama 3.2 3B",       "size_gb": 2.0, "min_vram_gb": 0, "use": "general · CPU-friendly"},
+    {"id": "qwen2.5:3b",         "label": "Qwen2.5 3B",        "size_gb": 1.9, "min_vram_gb": 0, "use": "default fingerprinting · CPU-friendly"},
     {"id": "qwen2.5-coder:7b",   "label": "Qwen2.5 Coder 7B",   "size_gb": 4.7, "min_vram_gb": 6, "use": "code · GPU recommended"},
     {"id": "llama3.1:8b",        "label": "Llama 3.1 8B",       "size_gb": 4.9, "min_vram_gb": 6, "use": "general · GPU recommended"},
     {"id": "qwen2.5-coder:14b",  "label": "Qwen2.5 Coder 14B",  "size_gb": 9.0, "min_vram_gb": 12, "use": "code · needs GPU"},

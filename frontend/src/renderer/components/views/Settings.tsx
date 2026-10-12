@@ -535,6 +535,7 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 	// pct is null while the status has no byte total yet (manifest/verify steps);
 	// busy is false once the pull finishes or errors, which also re-enables Download.
 	const [progress, setProgress] = useState<Record<string, { text: string; pct: number | null; busy: boolean }>>({});
+	const [copied, setCopied] = useState(false);
 	const esRef = useRef<EventSource | null>(null);
 	useEffect(() => () => esRef.current?.close(), []);
 
@@ -585,13 +586,11 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 					<span className="text-success">Ollama up ({data.url})</span>
 				) : data.runtime ? (
 					<span className="text-destructive">
-						configured but unreachable ({data.url}) — starting, or bring it up:{" "}
-						<span className="font-mono">docker compose up ollama</span>
+						configured but unreachable ({data.url}) — starting, or enable it below
 					</span>
 				) : (
 					<span className="text-muted-foreground">
-						none — set OLLAMA_URL or run{" "}
-						<span className="font-mono">docker compose up</span>
+						none — set OLLAMA_URL, or enable local models below
 					</span>
 				)}
 				{" · "}
@@ -604,6 +603,24 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 					<span className="text-muted-foreground">none detected — CPU-only recommendations</span>
 				)}
 			</Hint>
+			{!data.up && (
+				<div className="flex items-center gap-2">
+					{/* The backend runs in a container and can't start Docker on the host,
+					    so this copies the command for you to run in a terminal. */}
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={() => {
+							navigator.clipboard.writeText("docker compose --profile local up -d");
+							setCopied(true);
+							setTimeout(() => setCopied(false), 2000);
+						}}
+					>
+						{copied ? "✓ copied" : "Enable local models"}
+					</Button>
+					<span className="font-mono text-muted-foreground">docker compose --profile local up -d</span>
+				</div>
+			)}
 			<Table>
 				<TableHeader>
 					<TableRow>

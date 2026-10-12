@@ -27,7 +27,7 @@ def _select(creds: list[dict], ollama: str | None) -> tuple[str, str, str | None
     for r in creds:                                   # 4) local echo (no ollama) — last resort
         if r["transport"] == "local":
             return r["model"], "local", None
-    return "qwen3-4b", "local", None                  # nothing configured → free echo
+    return "qwen2.5:3b", "local", None                  # nothing configured → free echo
 
 
 async def light_transport() -> Transport:
@@ -45,12 +45,12 @@ async def light_transport() -> Transport:
 
 def demo() -> None:
     api = {"model": "gpt-5.1", "transport": "api", "api_key": "sk-x"}
-    echo = {"model": "qwen3-4b", "transport": "local", "api_key": None}
+    echo = {"model": "qwen2.5:3b", "transport": "local", "api_key": None}
     sub = {"model": "claude-opus-4.6", "transport": "subscription", "api_key": None}
     # echo present but so is a real key → the key wins (the extraction fix)
     assert _select([echo, api], ollama=None) == ("gpt-5.1", "api", "sk-x")
     # only echo configured → echo, but never ahead of a key
-    assert _select([echo], ollama=None) == ("qwen3-4b", "local", None)
+    assert _select([echo], ollama=None) == ("qwen2.5:3b", "local", None)
     # ollama up → local is real and preferred
     assert _select([echo, api], ollama="http://x")[1] == "local"
     # no key, no ollama, but a subscription CLI → subscription over echo

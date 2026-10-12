@@ -1,11 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApi } from "../api";
 import { Chip, Panel, PanelHeader } from "../components";
 
+type Model = { id: string; label: string; transports: string[] };
 type Catalog = {
-  providers: { provider: string; key_env: string | null; cli?: string;
-               models: { id: string; label: string; transports: string[] }[] }[];
+  providers: { provider: string; key_env: string | null; cli?: string; models: Model[] }[];
   roles: string[];
 };
 type Settings = {
@@ -15,7 +15,23 @@ type Settings = {
 type Role = { name: string; description: string; skills: string[]; resources: string[]; egress: string[]; researched_at: string | null };
 type Preset = { name: string; description: string; model_hint: string; skills: string[]; resources: string[]; egress: string[] };
 
-type TestResult = { tested: boolean; working?: boolean; detail?: string };
+type TestResult = { ok?: boolean; tested: boolean; working?: boolean; detail?: string };
+
+// one place deciding what a save result means, so ModelRow and ProviderPicker
+// agree. The credential is persisted whenever ok !== false (the row saves even
+// when the live test fails); a failed-closed save (ok:false, e.g. no
+// LINEAGE_SECRET_KEY to seal the key) is NOT saved and its error must stay
+// visible — the old code closed silently and left nothing added.
+const notSaved = (r: TestResult) => r.ok === false;
+const isErr = (r: TestResult) => r.ok === false || (r.tested && r.working === false);
+const saveMsg = (r: TestResult) =>
+  r.ok === false ? `✗ ${r.detail || "not saved"}`
+    : r.tested ? (r.working ? "✓ key works" : `✗ ${r.detail} (saved — fix in the table below)`)
+    : null;
+
+// above this many models per provider, the picker is a searchable dropdown
+// instead of one row per model (OpenRouter's live catalogue is hundreds).
+const DROPDOWN_OVER = 8;
 
 async function post(url: string, body?: unknown): Promise<any> {
   const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
@@ -23,12 +39,16 @@ async function post(url: string, body?: unknown): Promise<any> {
 }
 async function del(url: string) { await fetch(url, { method: "DELETE" }); }
 
+async function saveCred(model: string, transport: string, key: string): Promise<TestResult> {
+  return post("/api/settings/credentials", { model, transport, api_key: key || null, enabled: true });
+}
+
 export default function SettingsView() {
   const qc = useQueryClient();
   const { data: cat } = useApi<Catalog>("catalog");
   const { data: st } = useApi<Settings>("settings");
   const { data: roles } = useApi<Role[]>("roles");
-  const refresh = () => { qc.invalidateQueries({ queryKey: ["settings"] }); qc.invalidateQueries({ queryKey: ["agents"] }); };
+  const refresh = () => { qc.invalidateQueries({ queryKey: ["settings"] }); qc.invalidateQueries({ queryKey: ["agents"] }); qc.invalidateQueries({ queryKey: ["credits"] }); };
   const refreshRoles = () => qc.invalidateQueries({ queryKey: ["roles"] });
   if (!cat || !st) return null;
 
@@ -48,10 +68,11 @@ export default function SettingsView() {
             <div className="section-title" style={{ margin: "6px 0" }}>
               {p.provider}{p.key_env && <span className="hint" style={{ marginLeft: 8 }}>{p.key_env}</span>}
             </div>
-            {p.models.map((m) => (
-              <ModelRow key={m.id} m={m} configured={configured.has(m.id)}
-                onSaved={refresh} />
-            ))}
+            {p.models.length > DROPDOWN_OVER
+              ? <ProviderPicker models={p.models} configured={configured} onSaved={refresh} />
+              : p.models.map((m) => (
+                  <ModelRow key={m.id} m={m} configured={configured.has(m.id)} onSaved={refresh} />
+                ))}
           </div>
         ))}
       </Panel>
@@ -69,9 +90,21 @@ export default function SettingsView() {
         ) : <p className="hint">No models configured. Add one above to enable agents.</p>}
       </Panel>
 
+      {/* ── live credit monitoring ── */}
+      <Panel pad>
+        <PanelHeader title="Credits & spend" help="OpenRouter balance (when used), API spend by provider, and subscription quota — all live." />
+        <CreditsPanel />
+      </Panel>
+
+      {/* ── local models ── */}
+      <Panel pad>
+        <PanelHeader title="Local models" help="Download Ollama models to run nodes locally at zero marginal cost. Recommendations adapt to your detected GPU." />
+        <LocalModelsPanel onChanged={refresh} />
+      </Panel>
+
       {/* ── roles ── */}
       <Panel pad>
-        <PanelHeader title="Roles" help="Define a role and the central agent researches its skills + resources, which get injected into every node prompt that uses the role." />
+        <PanelHeader title="Roles" help="Define a role and the central agent researches its skills + resources (falling back to the ECC library), which get injected into every node prompt that uses the role." />
         <RolesPanel roles={roles ?? []} onChanged={refreshRoles} />
       </Panel>
 
@@ -129,8 +162,7 @@ function CredRow({ c, onRemoved }: {
 }
 
 function ModelRow({ m, configured, onSaved }: {
-  m: { id: string; label: string; transports: string[] };
-  configured: boolean; onSaved: () => void;
+  m: Model; configured: boolean; onSaved: () => void;
 }) {
   const [transport, setTransport] = useState(m.transports[0]);
   const [key, setKey] = useState("");
@@ -152,18 +184,194 @@ function ModelRow({ m, configured, onSaved }: {
             <button className="btn primary" style={{ padding: "4px 10px" }} disabled={busy}
               onClick={async () => {
                 setBusy(true); setRes(null);
-                const r: TestResult = await post("/api/settings/credentials", { model: m.id, transport, api_key: key || null, enabled: true });
+                const r = await saveCred(m.id, transport, key);
                 setBusy(false); setRes(r);
-                // keep the row open on failure so the user can correct the key; close on success
-                if (!r.tested || r.working) { setOpen(false); setKey(""); onSaved(); }
+                // saved (ok !== false) → add it to the configured list and close,
+                // even if the live test failed (consistent with the backend, which
+                // persists the row so a bad key can be re-tested/removed in the
+                // table). Only a not-saved result keeps the row open with its error.
+                if (!notSaved(r)) { onSaved(); setOpen(false); setKey(""); }
               }}>{busy ? "Testing…" : "Save & test"}</button>
             <button className="btn ghost" style={{ padding: "4px 10px" }} onClick={() => setOpen(false)}>Cancel</button>
-            {res && res.tested && (res.working
-              ? <span className="sage" title={res.detail}>✓ key works</span>
-              : <span className="rust" title={res.detail}>✗ {res.detail}</span>)}
+            {res && saveMsg(res) && <span className={isErr(res) ? "rust" : "sage"} title={res.detail}>{saveMsg(res)}</span>}
           </>
         ) : <button className="btn" style={{ padding: "3px 10px" }} onClick={() => setOpen(true)}>Add</button>
       )}
+    </div>
+  );
+}
+
+// Searchable single-select for providers with many models (OpenRouter live
+// catalogue, installed local models). Pick one, set transport/key, add it.
+function ProviderPicker({ models, configured, onSaved }: {
+  models: Model[]; configured: Set<string>; onSaved: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const [picked, setPicked] = useState("");
+  const [transport, setTransport] = useState("api");
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState<TestResult | null>(null);
+
+  const available = models.filter((m) => !configured.has(m.id));
+  const filtered = q.trim()
+    ? available.filter((m) => (m.label + " " + m.id).toLowerCase().includes(q.toLowerCase())).slice(0, 50)
+    : available.slice(0, 50);
+  const model = available.find((m) => m.id === picked);
+  useEffect(() => { if (model) setTransport(model.transports[0]); }, [picked]); // eslint-disable-line
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+      <input placeholder={`search ${available.length} models…`} value={q}
+        onChange={(e) => { setQ(e.target.value); }} style={{ width: 200 }} />
+      <select value={picked} onChange={(e) => { setPicked(e.target.value); setRes(null); }} style={{ minWidth: 260 }}>
+        <option value="">— pick a model —</option>
+        {filtered.map((m) => <option key={m.id} value={m.id}>{m.label} ({m.id})</option>)}
+      </select>
+      {model && (
+        <>
+          <select value={transport} onChange={(e) => setTransport(e.target.value)}>
+            {model.transports.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          {transport === "api" && <input placeholder="API key (optional if env set)" value={key} type="password"
+            onChange={(e) => setKey(e.target.value)} style={{ width: 200 }} />}
+          <button className="btn primary" style={{ padding: "4px 10px" }} disabled={busy}
+            onClick={async () => {
+              setBusy(true); setRes(null);
+              const r = await saveCred(model.id, transport, key);
+              setBusy(false); setRes(r);
+              if (!notSaved(r)) { onSaved(); setPicked(""); setKey(""); setQ(""); }
+            }}>{busy ? "Testing…" : "Save & test"}</button>
+          {res && saveMsg(res) && <span className={isErr(res) ? "rust" : "sage"} title={res.detail}>{saveMsg(res)}</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── live credit monitoring ───────────────────────────────────────────────────
+type Credits = {
+  openrouter: { configured: boolean; balance: { total: number; used: number; remaining: number } | null };
+  api_spend: { total: number; by_provider: Record<string, number> };
+  subscriptions: { cli: string; used: number; limit: number }[];
+};
+function CreditsPanel() {
+  const { data } = useApi<Credits>("credits");
+  if (!data) return <p className="hint">Loading…</p>;
+  const or = data.openrouter;
+  const providers = Object.entries(data.api_spend.by_provider);
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div>
+        <div className="section-title">OpenRouter</div>
+        {!or.configured ? <p className="hint">No OpenRouter key — add one above or set OPENROUTER_API_KEY.</p>
+          : or.balance ? (
+            <div style={{ display: "flex", gap: 18 }}>
+              <span className="sage">${or.balance.remaining.toFixed(2)}<span className="lbl dim"> remaining</span></span>
+              <span className="dim">${or.balance.used.toFixed(2)} used</span>
+              <span className="dimmer">${or.balance.total.toFixed(2)} total</span>
+            </div>
+          ) : <p className="hint rust">Balance unavailable (key rejected or OpenRouter unreachable).</p>}
+      </div>
+      <div>
+        <div className="section-title">API spend (metered)</div>
+        {providers.length ? (
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+            <span className="amber">${data.api_spend.total.toFixed(2)}<span className="lbl dim"> total</span></span>
+            {providers.map(([p, v]) => <span key={p} className="dim">{p} ${v.toFixed(2)}</span>)}
+          </div>
+        ) : <p className="hint">No metered spend yet.</p>}
+      </div>
+      <div>
+        <div className="section-title">Subscription quota</div>
+        {data.subscriptions.length ? data.subscriptions.map((s) => (
+          <div key={s.cli} style={{ display: "flex", alignItems: "center", gap: 8, margin: "3px 0" }}>
+            <span className="mono" style={{ width: 70 }}>{s.cli}</span>
+            <div style={{ flex: 1, maxWidth: 240, height: 6, background: "#222839", borderRadius: 3 }}>
+              <div style={{ width: `${Math.min(100, (s.used / s.limit) * 100)}%`, height: "100%",
+                background: s.used >= s.limit ? "#c0603a" : "#6a9", borderRadius: 3 }} />
+            </div>
+            <span className="dim">{s.used}/{s.limit} req</span>
+          </div>
+        )) : <p className="hint">No subscription agents configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── local model download ──────────────────────────────────────────────────────
+type LocalStatus = {
+  url: string | null; up: boolean; runtime: boolean;
+  gpu: { available: boolean; name: string | null; vram_gb: number };
+  installed: string[];
+  recommended: { id: string; label: string; size_gb: number; min_vram_gb: number; use: string; fits: boolean }[];
+};
+function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
+  const qc = useQueryClient();
+  const { data } = useApi<LocalStatus>("local/status");
+  const [progress, setProgress] = useState<Record<string, string>>({});
+  const esRef = useRef<EventSource | null>(null);
+  useEffect(() => () => esRef.current?.close(), []);
+
+  if (!data) return <p className="hint">Loading…</p>;
+  const gpu = data.gpu;
+
+  const pull = (id: string) => {
+    esRef.current?.close();
+    setProgress((p) => ({ ...p, [id]: "starting…" }));
+    const es = new EventSource(`/api/local/pull?model=${encodeURIComponent(id)}`);
+    esRef.current = es;
+    es.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        const pct = d.total ? ` ${Math.round((d.completed || 0) / d.total * 100)}%` : "";
+        setProgress((p) => ({ ...p, [id]: (d.status || "pulling") + pct }));
+      } catch { /* keep last */ }
+    };
+    es.addEventListener("done", () => { es.close(); setProgress((p) => ({ ...p, [id]: "✓ installed" })); qc.invalidateQueries({ queryKey: ["local/status"] }); qc.invalidateQueries({ queryKey: ["catalog"] }); onChanged(); });
+    es.addEventListener("error", (e) => {
+      const data = (e as MessageEvent).data;
+      es.close();
+      // a generic transport close (no data) after "done" isn't a failure — only
+      // a server-sent error event carries a message.
+      if (!data) return;
+      let msg = "failed"; try { msg = JSON.parse(data).error; } catch { /* generic */ }
+      setProgress((p) => ({ ...p, [id]: "✗ " + msg }));
+    });
+  };
+
+  return (
+    <div className="stack" style={{ gap: 10 }}>
+      <p className="hint">
+        Runtime: {data.up ? <span className="sage">Ollama up ({data.url})</span>
+          : data.runtime ? <span className="rust">configured but unreachable ({data.url}) — start it: <span className="mono">docker compose --profile local up</span></span>
+          : <span className="dim">none — set OLLAMA_URL or run <span className="mono">docker compose --profile local up</span></span>}
+        {" · "}
+        GPU: {gpu.available ? <span className="sage">{gpu.name} ({gpu.vram_gb} GB)</span> : <span className="dim">none detected — CPU-only recommendations</span>}
+      </p>
+      <table className="data">
+        <thead><tr><th>Model</th><th>Size</th><th>Use</th><th>Fit</th><th></th></tr></thead>
+        <tbody>
+          {data.recommended.map((m) => {
+            const installed = data.installed.some((i) => i === m.id || i.startsWith(m.id + ":"));
+            return (
+              <tr key={m.id}>
+                <td className="mono">{m.label}<span className="dim" style={{ marginLeft: 6 }}>{m.id}</span></td>
+                <td className="dim">{m.size_gb} GB</td>
+                <td className="dim">{m.use}</td>
+                <td>{m.fits ? <span className="sage" title="fits detected hardware">✓</span>
+                  : <span className="rust" title={`wants ${m.min_vram_gb} GB VRAM`}>needs GPU</span>}</td>
+                <td>
+                  {installed ? <Chip active>installed</Chip>
+                    : <button className="btn" style={{ padding: "2px 10px" }} disabled={!data.up || /pulling|starting|%/.test(progress[m.id] || "")}
+                        onClick={() => pull(m.id)}>Download</button>}
+                  {progress[m.id] && <span className="dim mono" style={{ marginLeft: 8 }}>{progress[m.id]}</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -99,6 +99,19 @@ def _base_url(model: str) -> str:
     return _BASES.get(provider, "https://api.openai.com/v1")
 
 
+def _key_env(model: str) -> str:
+    """The env var holding this model's API key. Catalog wins; otherwise a "/"
+    marks an OpenRouter slug (one OPENROUTER_API_KEY for all of them), a `claude`
+    prefix is Anthropic, and everything else is the OpenAI-compatible default."""
+    from .. import catalog
+
+    info = catalog.model_info(model)
+    return (info and info.get("key_env")) or (
+        "ANTHROPIC_API_KEY" if model.startswith("claude")
+        else "OPENROUTER_API_KEY" if "/" in model
+        else "OPENAI_API_KEY")
+
+
 def _anthropic_system(prompt: Prompt):
     """System as content blocks with a cache breakpoint after the stable prefix,
     so the run-constant tree is billed once (cache write) then read at 0.1×. No
@@ -121,11 +134,8 @@ class ApiTransport(Transport):
     async def complete(self, prompt: Prompt, *, schema=None, budget: Budget | None = None) -> Completion:
         import httpx
 
-        from .. import catalog
-
         anthropic = self.model.startswith("claude")
-        info = catalog.model_info(self.model)
-        env_var = (info and info.get("key_env")) or ("ANTHROPIC_API_KEY" if anthropic else "OPENAI_API_KEY")
+        env_var = _key_env(self.model)
         key = self._key or os.getenv(env_var)
         if not key:
             raise RuntimeError(f"{self.model}: no API key set ({env_var}) — this agent is API-only (§4)")
@@ -186,6 +196,11 @@ def demo() -> None:
         assert "openrouter.ai" in _base_url("anthropic/claude-sonnet-4.5")  # catalog
         assert "openrouter.ai" in _base_url("qwen/qwen3-next")             # slug heuristic, not in catalog
         assert _base_url("unknown-model") == "https://api.openai.com/v1"  # safe fallback
+        # the one OpenRouter key covers any slug, catalog or live-discovered.
+        assert _key_env("anthropic/claude-sonnet-4.5") == "OPENROUTER_API_KEY"  # catalog
+        assert _key_env("qwen/qwen3-next") == "OPENROUTER_API_KEY"             # slug heuristic
+        assert _key_env("claude-opus-4.6") == "ANTHROPIC_API_KEY"
+        assert _key_env("gpt-5.1") == "OPENAI_API_KEY"
         os.environ["OPENAI_BASE_URL"] = "http://proxy:1234/v1"
         assert _base_url("deepseek-v3.2") == "http://proxy:1234/v1"  # override wins
         # cache discount: a fully-cached call costs less than a fully-fresh one,

@@ -139,6 +139,66 @@ ROLE_PRESETS = [
      "resources": ["Context7 MCP"]},
 ]
 
+# Downloadable local models (Ollama tags) the Settings "Local models" panel can
+# pull. `min_vram_gb=0` runs fine on CPU; larger ones want a GPU — the UI badges
+# each against the detected hardware so the choice is smart regardless (§4). Size
+# is the on-disk download, approximate.
+LOCAL_MODELS = [
+    {"id": "qwen2.5-coder:1.5b", "label": "Qwen2.5 Coder 1.5B", "size_gb": 1.0, "min_vram_gb": 0, "use": "code · CPU-friendly"},
+    {"id": "llama3.2:3b",        "label": "Llama 3.2 3B",       "size_gb": 2.0, "min_vram_gb": 0, "use": "general · CPU-friendly"},
+    {"id": "qwen2.5-coder:7b",   "label": "Qwen2.5 Coder 7B",   "size_gb": 4.7, "min_vram_gb": 6, "use": "code · GPU recommended"},
+    {"id": "llama3.1:8b",        "label": "Llama 3.1 8B",       "size_gb": 4.9, "min_vram_gb": 6, "use": "general · GPU recommended"},
+    {"id": "qwen2.5-coder:14b",  "label": "Qwen2.5 Coder 14B",  "size_gb": 9.0, "min_vram_gb": 12, "use": "code · needs GPU"},
+    {"id": "qwen2.5-coder:32b",  "label": "Qwen2.5 Coder 32B",  "size_gb": 20.0, "min_vram_gb": 24, "use": "code · needs big GPU"},
+    {"id": "bge-m3",             "label": "BGE-M3 embeddings",   "size_gb": 1.2, "min_vram_gb": 0, "use": "embeddings · CPU-friendly"},
+]
+
+# generic baseline so a researched role is never skill-less when no model is
+# reachable and nothing in the ECC library matches (§3).
+_GENERIC_SKILLS = ["requirements analysis", "implementation", "testing", "code review", "documentation"]
+_GENERIC_RESOURCES = ["standard library", "package registries", "project docs"]
+
+
+def local_recommended(gpu_vram_gb: float) -> list[dict]:
+    """Every downloadable local model, each flagged `fits` for the detected GPU
+    (0 VRAM ⇒ CPU-only, so only the min_vram_gb==0 models are recommended)."""
+    return [{**m, "fits": m["min_vram_gb"] <= gpu_vram_gb} for m in LOCAL_MODELS]
+
+
+def _toks(s: str) -> set[str]:
+    import re
+    return set(re.findall(r"[a-z0-9]+", (s or "").lower()))
+
+
+def nearest_preset(name: str, description: str = "") -> dict | None:
+    """Best-matching ECC starter role for a free-typed role, by token overlap of
+    name/description against each preset's name, description, and skills. Lets a
+    researched role still inherit real ECC skills when no model is reachable to
+    research one. None when nothing overlaps."""
+    want = _toks(name) | _toks(description)
+    if not want:
+        return None
+    best, score = None, 0
+    for p in ROLE_PRESETS:
+        hay = _toks(p["name"]) | _toks(p["description"]) | {t for s in p["skills"] for t in _toks(s)}
+        overlap = len(want & hay)
+        # bonus when the role families share a word (e.g. "security" ⊂ "security-reviewer")
+        if _toks(p["name"]) & want:
+            overlap += 2
+        if overlap > score:
+            best, score = p, overlap
+    return best if score else None
+
+
+def fallback_profile(name: str, description: str = "") -> dict:
+    """Skills + resources for a role when research yields nothing: the nearest ECC
+    preset if one matches, else a generic baseline so the role is never empty."""
+    p = nearest_preset(name, description)
+    if p:
+        return {"skills": list(p["skills"]), "resources": list(p["resources"])}
+    return {"skills": list(_GENERIC_SKILLS), "resources": list(_GENERIC_RESOURCES)}
+
+
 _BY_ID = {m["id"]: {**m, "provider": g["provider"], "key_env": g.get("key_env")}
           for g in CATALOG for m in g["models"]}
 
@@ -149,3 +209,20 @@ def model_info(model_id: str) -> dict | None:
 
 def all_model_ids() -> list[str]:
     return list(_BY_ID)
+
+
+def demo() -> None:
+    assert nearest_preset("security")["name"] == "security-reviewer"
+    assert nearest_preset("react component")["name"] == "react-reviewer"
+    # a novel role still gets a non-empty baseline
+    fb = fallback_profile("vibes-curator")
+    assert fb["skills"] and fb["resources"]
+    # CPU (0 VRAM) recommends only the small models
+    rec = {m["id"]: m["fits"] for m in local_recommended(0)}
+    assert rec["qwen2.5-coder:1.5b"] and not rec["qwen2.5-coder:14b"]
+    assert all(m["fits"] for m in local_recommended(24))  # a big GPU fits everything
+    print("catalog.demo ok")
+
+
+if __name__ == "__main__":
+    demo()

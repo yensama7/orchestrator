@@ -94,9 +94,16 @@ Everything runs offline with sensible fallbacks; these get *better*, not
 
 - **OpenRouter (one key, every model)** — set `OPENROUTER_API_KEY` once (env, or
   on any one OpenRouter row in Settings) and bind agents to any OpenRouter model.
-  Settings shows a curated handful plus OpenRouter's full live catalogue
-  (`OPENROUTER_DISCOVER=0` to skip the fetch). Cost is read back from OpenRouter
-  per call, so the spend rail stays honest without per-model price tables.
+  Settings shows a curated handful plus OpenRouter's full live catalogue in a
+  searchable dropdown (`OPENROUTER_DISCOVER=0` to skip the fetch). Cost is read
+  back from OpenRouter per call, so the spend rail stays honest without per-model
+  price tables, and **Settings → Credits & spend** shows your live OpenRouter
+  balance, API spend by provider, and subscription quota.
+- **Local models (download in Settings)** — `docker compose --profile local up`
+  starts an Ollama service; **Settings → Local models** then detects it (and any
+  NVIDIA GPU), recommends models sized to your hardware, and pulls them with live
+  progress. Point `OLLAMA_URL` at a host Ollama to use your own instead. Local
+  nodes cost nothing, so the §P2 router sends cheap work there when present.
 - **Real model calls** — set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (metered) or
   install the headless CLIs (subscription). Without them the local echo runs
   every node for free, so the loop still completes — but any run that touched the

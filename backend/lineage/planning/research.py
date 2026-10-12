@@ -22,14 +22,25 @@ _SYS = (
 
 
 async def research_role(name: str, description: str = "") -> dict:
+    """Research a role into skills + resources. A reachable model researches it
+    live; otherwise (echo-only, no key/CLI) we fall back to the nearest ECC
+    starter role, or a generic baseline — so "Research & add" always yields a
+    skilled role instead of an empty one (§3)."""
+    from .. import catalog
+
+    skills: list[str] = []
+    resources: list[str] = []
     try:
         comp = await (await light_transport()).complete(
             Prompt(system=_SYS, user=f"role: {name}\ndescription: {description}"))
         data = json.loads(_json_slice(comp.text))
-        return {"skills": [str(s) for s in data.get("skills", [])][:8],
-                "resources": [str(r) for r in data.get("resources", [])][:6]}
+        skills = [str(s) for s in data.get("skills", [])][:8]
+        resources = [str(r) for r in data.get("resources", [])][:6]
     except Exception:
-        return {"skills": [], "resources": []}  # CLI missing → re-run research later
+        pass  # no model reachable / bad JSON → ECC fallback below
+    if not skills:
+        return catalog.fallback_profile(name, description)
+    return {"skills": skills, "resources": resources}
 
 
 def _json_slice(text: str) -> str:

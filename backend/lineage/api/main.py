@@ -484,6 +484,138 @@ async def del_role(name: str):
     return {"ok": True}
 
 
+# ── live credit monitoring: OpenRouter balance, API spend, subscription quota ─
+async def _openrouter_key() -> str | None:
+    """The OpenRouter key in play: a stored OpenRouter credential wins, else the
+    OPENROUTER_API_KEY env the whole stack falls back to (compose.yaml)."""
+    async with tenant_conn() as c:
+        rows = await c.fetch(
+            "SELECT model, api_key FROM model_credentials WHERE transport='api' AND api_key IS NOT NULL")
+    for r in rows:
+        info = catalog.model_info(r["model"])
+        if (info and info.get("provider") == "OpenRouter") or "/" in r["model"]:
+            k = vault.open_(r["api_key"])
+            if k:
+                return k
+    return os.getenv("OPENROUTER_API_KEY") or None
+
+
+async def _openrouter_balance(key: str) -> dict | None:
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=6) as c:
+            r = await c.get("https://openrouter.ai/api/v1/credits",
+                            headers={"Authorization": f"Bearer {key}"})
+            r.raise_for_status()
+            d = r.json().get("data", {})
+            total, used = float(d.get("total_credits", 0)), float(d.get("total_usage", 0))
+            return {"total": round(total, 4), "used": round(used, 4), "remaining": round(total - used, 4)}
+    except Exception:
+        return None  # bad key / unreachable → UI shows "unavailable", never crashes
+
+
+# subscription CLI → its rate-window limit (subscription.py CLIS), by model prefix
+def _cli_of(model: str) -> str:
+    return "claude" if model.startswith("claude") else "gemini" if model.startswith("gemini") else "codex"
+
+
+@app.get("/api/credits")
+async def credits():
+    """Everything spend-related in one read: OpenRouter credit left (if used),
+    API-key spend by provider, and subscription quota (calls vs the CLI window)."""
+    from ..transports.subscription import CLIS
+
+    key = await _openrouter_key()
+    openrouter = {"configured": bool(key), "balance": await _openrouter_balance(key) if key else None}
+
+    async with tenant_conn() as c:
+        rows = await c.fetch("SELECT model, transport, cost_usd, calls FROM agents")
+    api_by_provider: dict[str, float] = {}
+    subs: dict[str, int] = {}
+    for r in rows:
+        if r["transport"] == "api":
+            info = catalog.model_info(r["model"])
+            prov = (info or {}).get("provider") or ("OpenRouter" if "/" in r["model"] else "API")
+            api_by_provider[prov] = api_by_provider.get(prov, 0.0) + float(r["cost_usd"])
+        elif r["transport"] == "subscription":
+            subs[_cli_of(r["model"])] = subs.get(_cli_of(r["model"]), 0) + int(r["calls"])
+    return {
+        "openrouter": openrouter,
+        "api_spend": {"total": round(sum(api_by_provider.values()), 4),
+                      "by_provider": {k: round(v, 4) for k, v in sorted(api_by_provider.items())}},
+        "subscriptions": [{"cli": cli, "used": used, "limit": CLIS[cli].window_limit}
+                          for cli, used in sorted(subs.items()) if cli in CLIS],
+    }
+
+
+# ── local models: detect hardware, list/pull Ollama models ───────────────────
+def _detect_gpu() -> dict:
+    """Best-effort NVIDIA detection via nvidia-smi — advisory only (recommendations
+    still render without it). vram_gb=0 means CPU-only as far as we can tell."""
+    import shutil
+    import subprocess
+
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return {"available": False, "name": None, "vram_gb": 0}
+    try:
+        out = subprocess.run([exe, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5)
+        line = next((l for l in out.stdout.splitlines() if l.strip()), "")
+        name, _, mem = line.partition(",")
+        return {"available": bool(name), "name": name.strip() or None,
+                "vram_gb": round(float(mem.strip()) / 1024, 1) if mem.strip() else 0}
+    except Exception:
+        return {"available": False, "name": None, "vram_gb": 0}
+
+
+async def _ollama_up(url: str) -> bool:
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{url}/api/version")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+@app.get("/api/local/status")
+async def local_status():
+    from ..transports.local import _OLLAMA
+
+    gpu = _detect_gpu()
+    up = await _ollama_up(_OLLAMA) if _OLLAMA else False
+    return {"url": _OLLAMA, "up": up, "runtime": bool(_OLLAMA), "gpu": gpu,
+            "installed": await _discover_local_models() if up else [],
+            "recommended": catalog.local_recommended(gpu["vram_gb"])}
+
+
+@app.get("/api/local/pull")
+async def local_pull(model: str):
+    """Stream an Ollama pull as SSE progress. GET (not POST) so the browser's
+    EventSource can consume it directly — this is a local dev console, the pull
+    is idempotent, and there's no cross-origin surface."""
+    from ..transports.local import _OLLAMA
+
+    async def gen():
+        if not _OLLAMA:
+            yield f"event: error\ndata: {json.dumps({'error': 'No local runtime — start Ollama and set OLLAMA_URL (compose: --profile local).'})}\n\n"
+            return
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=None) as c:
+                async with c.stream("POST", f"{_OLLAMA}/api/pull", json={"model": model}) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if line.strip():
+                            yield f"data: {line}\n\n"
+            yield "event: done\ndata: {}\n\n"
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'error': f'{type(e).__name__}: {e}'[:200]})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 # ── workspace import ────────────────────────────────────────────────────────
 @app.post("/api/workspace/import")
 async def import_folder(files: list[UploadFile], paths: str = Form("[]"), run: str | None = None):

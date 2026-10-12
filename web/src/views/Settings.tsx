@@ -12,7 +12,8 @@ type Settings = {
   credentials: { model: string; transport: string; enabled: boolean; has_key: boolean; key_hint: string }[];
   agents: { agent: string; role: string; model: string; transport: string; enabled: boolean }[];
 };
-type Role = { name: string; description: string; skills: string[]; resources: string[]; researched_at: string | null };
+type Role = { name: string; description: string; skills: string[]; resources: string[]; egress: string[]; researched_at: string | null };
+type Preset = { name: string; description: string; model_hint: string; skills: string[]; resources: string[]; egress: string[] };
 
 type TestResult = { tested: boolean; working?: boolean; detail?: string };
 
@@ -171,6 +172,9 @@ function RolesPanel({ roles, onChanged }: { roles: Role[]; onChanged: () => void
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
   const [busy, setBusy] = useState(false);
+  const { data: presets } = useApi<Preset[]>("roles/presets");
+  const have = new Set(roles.map((r) => r.name));
+  const addable = (presets ?? []).filter((p) => !have.has(p.name));
   return (
     <>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -183,22 +187,36 @@ function RolesPanel({ roles, onChanged }: { roles: Role[]; onChanged: () => void
             setBusy(false); setName(""); setDesc(""); onChanged();
           }}>{busy ? "Researching…" : "Research & add"}</button>
       </div>
+      {addable.length ? (
+        <div style={{ marginTop: 10 }}>
+          <p className="hint" style={{ marginBottom: 6 }}>Starter roles (ECC) — skills, resources + egress pre-filled, no research call:</p>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {addable.map((p) => (
+              <button key={p.name} className="btn ghost" style={{ padding: "3px 10px" }} title={p.description}
+                onClick={async () => { await post(`/api/roles/presets/${encodeURIComponent(p.name)}`); onChanged(); }}>
+                + {p.name} <span className="dim">· {p.model_hint}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {roles.length ? (
         <table className="data" style={{ marginTop: 10 }}>
-          <thead><tr><th>Role</th><th>Skills</th><th>Resources</th><th></th></tr></thead>
+          <thead><tr><th>Role</th><th>Skills</th><th>Resources</th><th>Egress</th><th></th></tr></thead>
           <tbody>
             {roles.map((r) => (
               <tr key={r.name}>
                 <td className="role">{r.name}</td>
                 <td className="dim">{r.skills.join(", ") || "—"}</td>
                 <td className="dim">{r.resources.join(", ") || "—"}</td>
+                <td className="dim">{r.egress?.length ? r.egress.join(", ") : "deny-all"}</td>
                 <td><button className="btn ghost" style={{ padding: "2px 8px" }}
                   onClick={async () => { await del(`/api/roles/${encodeURIComponent(r.name)}`); onChanged(); }}>Remove</button></td>
               </tr>
             ))}
           </tbody>
         </table>
-      ) : <p className="hint" style={{ marginTop: 10 }}>No researched roles yet. Add one to inject skills into prompts.</p>}
+      ) : <p className="hint" style={{ marginTop: 10 }}>No researched roles yet. Add one above, or pick a starter role.</p>}
     </>
   );
 }

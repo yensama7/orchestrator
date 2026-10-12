@@ -20,9 +20,24 @@ ALLOWLIST: dict[str, list[str]] = {
     "drift": ["registry.npmjs.org", "pypi.org", "api.osv.dev"],
 }
 
+# User-defined per-role host globs from the roles table, loaded at API startup
+# and refreshed on role add/delete (api/main._refresh_egress). Merged *over* the
+# hardcoded ALLOWLIST — additive only: a user can widen a role's egress, never
+# punch below the deny-by-default floor a hardcoded role already sets.
+_OVERRIDES: dict[str, list[str]] = {}
+
+
+def set_overrides(mapping: dict[str, list[str]]) -> None:
+    global _OVERRIDES
+    _OVERRIDES = {k: list(v) for k, v in mapping.items() if v}
+
+
+def patterns(role: str) -> list[str]:
+    return ALLOWLIST.get(role, []) + _OVERRIDES.get(role, [])
+
 
 def allowed(role: str, host: str) -> bool:
-    return any(fnmatch(host, pat) for pat in ALLOWLIST.get(role, []))
+    return any(fnmatch(host, pat) for pat in patterns(role))
 
 
 def check(role: str, host: str) -> None:
@@ -35,6 +50,12 @@ def demo() -> None:
     assert not allowed("frontend", "api.openai.com")
     assert not allowed("security-analyst", "api.anthropic.com")  # empty = deny-all
     assert not allowed("unknown-role", "anything")               # default deny
+    # user overlay widens a role, additive over the hardcoded floor
+    set_overrides({"frontend": ["cdn.example.com"], "security": []})
+    assert allowed("frontend", "cdn.example.com")                # added by user
+    assert allowed("frontend", "registry.npmjs.org")             # hardcoded still holds
+    assert not allowed("security", "cdn.example.com")            # empty override = no-op
+    set_overrides({})                                            # reset for the rest
     try:
         check("frontend", "evil.example")
         raise AssertionError("should have denied")

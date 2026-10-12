@@ -25,6 +25,7 @@ from ..execution import reverify as reverify_mod
 from ..execution import runner as runner_mod
 from ..execution import worktree as worktree_mod
 from ..memory import drift as drift_mod
+from ..security import egress as egress_mod
 from ..security import vault
 from ..transports import Budget, Prompt, build as build_transport
 from ..planning import extract as extract_mod
@@ -98,6 +99,7 @@ async def lifespan(app: FastAPI):
                 raise
             await asyncio.sleep(1)
     await migrate()  # idempotent — brings a stale volume up to the current schema
+    await _refresh_egress()  # load user-defined per-role egress globs into the gate
     if os.getenv("LINEAGE_SEED") == "1":
         await seed.seed()
     drift_task = asyncio.create_task(_drift_loop()) if os.getenv("DRIFT_SWEEP", "1") != "0" else None
@@ -257,7 +259,31 @@ async def get_catalog():
         prov["models"] = prov["models"] + [
             {"id": m, "label": f"{m} (installed)", "transports": ["local"]}
             for m in installed if m not in known]
+    # merge OpenRouter's live catalogue so any model it serves can be added with
+    # the one OPENROUTER_API_KEY — not just the curated few (same shape as above).
+    orouter = await _discover_openrouter_models()
+    if orouter:
+        prov = next(p for p in providers if p["provider"] == "OpenRouter")
+        known = {m["id"] for m in prov["models"]}
+        prov["models"] = prov["models"] + [
+            {"id": m["id"], "label": m["label"], "transports": ["api"]}
+            for m in orouter if m["id"] not in known]
     return {"providers": providers, "roles": catalog.ROLE_HINTS}
+
+
+async def _discover_openrouter_models() -> list[dict]:
+    """OpenRouter's public model list (no key needed). OPENROUTER_DISCOVER=0 to
+    stay on the curated set. Unreachable → curated defaults only."""
+    if os.getenv("OPENROUTER_DISCOVER", "1") == "0":
+        return []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=4) as c:
+            r = await c.get("https://openrouter.ai/api/v1/models")
+            r.raise_for_status()
+            return [{"id": m["id"], "label": m.get("name", m["id"])} for m in r.json().get("data", [])]
+    except Exception:
+        return []
 
 
 async def _discover_local_models() -> list[str]:
@@ -389,32 +415,64 @@ async def del_agent(agent: str):
 class RoleIn(BaseModel):
     name: str
     description: str = ""
+    egress: list[str] | None = None  # user-editable per-role host allowlist (§11)
+
+
+async def _refresh_egress() -> None:
+    """Load every role's egress globs into the security gate. Called at startup
+    and after any role mutation, so the allowlist the broker enforces tracks what
+    the user has configured without a restart."""
+    async with tenant_conn() as c:
+        rows = await c.fetch("SELECT name, egress FROM roles")
+    egress_mod.set_overrides({r["name"]: _jarr(r["egress"]) for r in rows})
+
+
+async def _save_role(name, description, skills, resources, egress) -> None:
+    async with tenant_conn() as c:
+        await c.execute(
+            """INSERT INTO roles (tenant_id, name, description, skills, resources, egress, researched_at)
+               VALUES (current_setting('app.tenant_id')::uuid, $1,$2,$3::jsonb,$4::jsonb,$5::jsonb, now())
+               ON CONFLICT (tenant_id, name) DO UPDATE
+                 SET description=EXCLUDED.description, skills=EXCLUDED.skills,
+                     resources=EXCLUDED.resources, egress=EXCLUDED.egress, researched_at=now()""",
+            name, description, json.dumps(skills), json.dumps(resources), json.dumps(egress))
+    await _refresh_egress()
 
 
 @app.get("/api/roles")
 async def list_roles():
     async with tenant_conn() as c:
         rows = await c.fetch(
-            "SELECT name, description, skills, resources, researched_at FROM roles ORDER BY name")
+            "SELECT name, description, skills, resources, egress, researched_at FROM roles ORDER BY name")
     return [{"name": r["name"], "description": r["description"],
              "skills": _jarr(r["skills"]), "resources": _jarr(r["resources"]),
+             "egress": _jarr(r["egress"]),
              "researched_at": r["researched_at"].isoformat() if r["researched_at"] else None}
             for r in rows]
+
+
+@app.get("/api/roles/presets")
+async def list_role_presets():
+    """ECC-derived starter roles the user can add with one click (no research call)."""
+    return catalog.ROLE_PRESETS
+
+
+@app.post("/api/roles/presets/{name}")
+async def add_role_preset(name: str):
+    preset = next((p for p in catalog.ROLE_PRESETS if p["name"] == name), None)
+    if not preset:
+        return {"ok": False, "error": f"no preset named {name}"}
+    await _save_role(preset["name"], preset["description"], preset["skills"],
+                     preset["resources"], preset.get("egress", []))
+    return {"ok": True, **{k: preset[k] for k in ("skills", "resources") if k in preset}}
 
 
 @app.post("/api/roles")
 async def add_role(body: RoleIn):
     # central agent researches the role (new or existing — this refreshes it)
     profile = await research_mod.research_role(body.name, body.description)
-    async with tenant_conn() as c:
-        await c.execute(
-            """INSERT INTO roles (tenant_id, name, description, skills, resources, researched_at)
-               VALUES (current_setting('app.tenant_id')::uuid, $1,$2,$3::jsonb,$4::jsonb, now())
-               ON CONFLICT (tenant_id, name) DO UPDATE
-                 SET description=EXCLUDED.description, skills=EXCLUDED.skills,
-                     resources=EXCLUDED.resources, researched_at=now()""",
-            body.name, body.description,
-            json.dumps(profile["skills"]), json.dumps(profile["resources"]))
+    await _save_role(body.name, body.description, profile["skills"],
+                     profile["resources"], body.egress or [])
     return {"ok": True, **profile}
 
 
@@ -422,6 +480,7 @@ async def add_role(body: RoleIn):
 async def del_role(name: str):
     async with tenant_conn() as c:
         await c.execute("DELETE FROM roles WHERE name=$1", name)
+    await _refresh_egress()
     return {"ok": True}
 
 

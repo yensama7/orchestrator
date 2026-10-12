@@ -341,4 +341,11 @@
 	::-webkit-scrollbar-track {
 		background: transparent;
 	}
+	/* Backdrop for Dialog/Sheet overlays (ported primitives reference this class). */
+	.dialog-overlay {
+		position: fixed;
+		inset: 0;
+		z-index: 50;
+		background: var(--color-scrim);
+	}
 }

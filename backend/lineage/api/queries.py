@@ -82,6 +82,31 @@ async def run_header(c, run_id) -> dict:
     }
 
 
+async def board(c) -> dict:
+    """Live Kanban cards (§P4). One card per run; lane bucketing is a pure
+    client function (lib/board-presentation.ts) — this just supplies the facts
+    `/api/runs` lacks: verified_count, cost-per-verified, and open-dissent
+    presence. Open dissent = a recorded disagreement not yet settled
+    (dormant/resurrected, not vindicated/refuted) → the card's "needs you" flag."""
+    runs = await c.fetch(
+        """SELECT r.id, r.name, r.status, r.mode, r.spent_usd, r.verified_count,
+                  EXISTS(SELECT 1 FROM dissent d WHERE d.run_id = r.id
+                         AND d.status NOT IN ('vindicated','refuted')) AS open_dissent
+           FROM runs r ORDER BY r.created_at DESC, r.name""")
+    cards = []
+    for r in runs:
+        spent = round(float(r["spent_usd"]), 2)
+        verified = int(r["verified_count"] or 0)
+        cards.append({
+            "id": str(r["id"]), "label": _short(r["id"]), "name": r["name"],
+            "status": r["status"], "mode": r["mode"], "spent": spent,
+            "verified_count": verified,
+            "cost_per_verified": round(spent / verified, 2) if verified else None,
+            "open_dissent": r["open_dissent"],
+        })
+    return {"cards": cards}
+
+
 async def lineage_graph(c, run_id) -> dict:
     runs = await c.fetch(
         "SELECT id, name, fingerprint, status, spent_usd, template_id, forked_from FROM runs")

@@ -138,6 +138,12 @@ async def list_runs():
     }
 
 
+@app.get("/api/board")
+async def board():
+    async with tenant_conn() as c:
+        return await queries.board(c)
+
+
 @app.get("/api/run")
 async def run(run: str | None = None):
     async with tenant_conn() as c:

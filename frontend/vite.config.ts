@@ -1,12 +1,18 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { fileURLToPath, URL } from "node:url";
 
 // Dev proxies /api (REST + SSE stream) to the FastAPI backend so the frontend is
 // same-origin, exactly as the nginx build will be in compose (Phase 6).
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  // Router codegen must run before react so routeTree.gen.ts exists for the build.
+  plugins: [
+    tanstackRouter({ target: "react", routesDirectory: "./src/renderer/routes", generatedRouteTree: "./src/renderer/routeTree.gen.ts" }),
+    react(),
+    tailwindcss(),
+  ],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src/renderer", import.meta.url)) },
   },

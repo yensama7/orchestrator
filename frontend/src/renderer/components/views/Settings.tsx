@@ -38,8 +38,11 @@ type TestResult = { ok?: boolean; tested: boolean; working?: boolean; detail?: s
 // Native <select> styled to match the shadcn inputs. ponytail: a styled native
 // select is accessible and handles hundreds of options with zero extra
 // primitives — no Command/Popover needed for the searchable picker below.
+// The [&>option] colors are explicit because some engines render the native
+// option popup on a light surface regardless of color-scheme — without them the
+// list is unreadable in dark mode.
 const selectCls =
-	"h-control-form rounded-md border border-border bg-input/50 px-2 text-sm text-foreground outline-none";
+	"h-control-form rounded-md border border-border bg-input/50 px-2 text-sm text-foreground outline-none [&>option]:bg-popover [&>option]:text-popover-foreground";
 
 // one place deciding what a save result means, so ModelRow and ProviderPicker
 // agree. The credential is persisted whenever ok !== false; a failed-closed save
@@ -529,7 +532,9 @@ type LocalStatus = {
 function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 	const qc = useQueryClient();
 	const { data } = useApi<LocalStatus>("local/status");
-	const [progress, setProgress] = useState<Record<string, string>>({});
+	// pct is null while the status has no byte total yet (manifest/verify steps);
+	// busy is false once the pull finishes or errors, which also re-enables Download.
+	const [progress, setProgress] = useState<Record<string, { text: string; pct: number | null; busy: boolean }>>({});
 	const esRef = useRef<EventSource | null>(null);
 	useEffect(() => () => esRef.current?.close(), []);
 
@@ -538,21 +543,21 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 
 	const pull = (id: string) => {
 		esRef.current?.close();
-		setProgress((p) => ({ ...p, [id]: "starting…" }));
+		setProgress((p) => ({ ...p, [id]: { text: "starting…", pct: null, busy: true } }));
 		const es = new EventSource(`/api/local/pull?model=${encodeURIComponent(id)}`);
 		esRef.current = es;
 		es.onmessage = (e) => {
 			try {
 				const d = JSON.parse(e.data);
-				const pct = d.total ? ` ${Math.round(((d.completed || 0) / d.total) * 100)}%` : "";
-				setProgress((p) => ({ ...p, [id]: (d.status || "pulling") + pct }));
+				const pct = d.total ? Math.round(((d.completed || 0) / d.total) * 100) : null;
+				setProgress((p) => ({ ...p, [id]: { text: d.status || "pulling", pct, busy: true } }));
 			} catch {
 				/* keep last */
 			}
 		};
 		es.addEventListener("done", () => {
 			es.close();
-			setProgress((p) => ({ ...p, [id]: "✓ installed" }));
+			setProgress((p) => ({ ...p, [id]: { text: "✓ installed", pct: 100, busy: false } }));
 			qc.invalidateQueries({ queryKey: ["local/status"] });
 			qc.invalidateQueries({ queryKey: ["catalog"] });
 			onChanged();
@@ -568,7 +573,7 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 			} catch {
 				/* generic */
 			}
-			setProgress((p) => ({ ...p, [id]: "✗ " + msg }));
+			setProgress((p) => ({ ...p, [id]: { text: "✗ " + msg, pct: null, busy: false } }));
 		});
 	};
 
@@ -580,13 +585,13 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 					<span className="text-success">Ollama up ({data.url})</span>
 				) : data.runtime ? (
 					<span className="text-destructive">
-						configured but unreachable ({data.url}) — start it:{" "}
-						<span className="font-mono">docker compose --profile local up</span>
+						configured but unreachable ({data.url}) — starting, or bring it up:{" "}
+						<span className="font-mono">docker compose up ollama</span>
 					</span>
 				) : (
 					<span className="text-muted-foreground">
 						none — set OLLAMA_URL or run{" "}
-						<span className="font-mono">docker compose --profile local up</span>
+						<span className="font-mono">docker compose up</span>
 					</span>
 				)}
 				{" · "}
@@ -612,6 +617,7 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 				<TableBody>
 					{data.recommended.map((m) => {
 						const installed = data.installed.some((i) => i === m.id || i.startsWith(m.id + ":"));
+						const prog = progress[m.id];
 						return (
 							<TableRow key={m.id}>
 								<TableCell className="font-mono">
@@ -638,15 +644,28 @@ function LocalModelsPanel({ onChanged }: { onChanged: () => void }) {
 										<Button
 											variant="outline"
 											size="sm"
-											disabled={!data.up || /pulling|starting|%/.test(progress[m.id] || "")}
+											disabled={!data.up || prog?.busy}
 											onClick={() => pull(m.id)}
 										>
 											Download
 										</Button>
 									)}
-									{progress[m.id] && (
-										<span className="ml-2 font-mono text-muted-foreground">{progress[m.id]}</span>
-									)}
+									{prog &&
+										(prog.busy && prog.pct !== null ? (
+											<span className="ml-2 inline-flex items-center gap-1.5 align-middle">
+												<span className="h-1.5 w-[120px] overflow-hidden rounded-sm bg-interactive-active">
+													<span
+														className="block h-full rounded-sm bg-success transition-[width] duration-200"
+														style={{ width: `${prog.pct}%` }}
+													/>
+												</span>
+												<span className="font-mono text-muted-foreground">
+													{prog.text} {prog.pct}%
+												</span>
+											</span>
+										) : (
+											<span className="ml-2 font-mono text-muted-foreground">{prog.text}</span>
+										))}
 								</TableCell>
 							</TableRow>
 						);

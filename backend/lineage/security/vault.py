@@ -12,10 +12,18 @@ One seam, one default impl (no interface-for-one-impl):
   (no backfill migration needed).
 
 The key comes from ``LINEAGE_SECRET_KEY`` (a Fernet urlsafe-base64 32-byte key;
-generate one with ``python -m lineage.security.vault --keygen``). When it's
-absent the module degrades to plaintext — dev stays runnable with zero config,
-and the header of every Settings response still can't leak a stored key because
+generate one with ``python -m lineage.security.vault --keygen``). When that env
+var is absent we fall back to a key auto-generated once and persisted under
+``LINEAGE_SECRET_DIR`` (default ``~/.lineage``) — so keys entered in Settings are
+encrypted at rest with zero config and survive restarts, and the user never hits
+a plaintext-refusal just to save a key. Only if that dir can't be written does
+the module degrade: seal with ``require`` still fails closed rather than writing
+plaintext. The header of every Settings response can't leak a stored key because
 only ``open_`` ever reconstructs it.
+
+Persist the key dir to keep stored keys openable across container restarts
+(compose mounts a volume at ``~/.lineage``). Lose the key → sealed values are
+unrecoverable, exactly like losing a KMS key.
 
 ponytail: swap point for a real KMS — replace the two Fernet lines in ``_cipher``
 with a KMS/Vault encrypt/decrypt and keep the ``enc:v1:`` envelope; callers don't
@@ -27,16 +35,41 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 _MARKER = "enc:v1:"
 
 
+def _key_file() -> Path:
+    base = os.getenv("LINEAGE_SECRET_DIR") or str(Path.home() / ".lineage")
+    return Path(base) / "secret.key"
+
+
+def _file_key() -> str | None:
+    """Read, or first-time create, the persisted auto-key. Returns None only if
+    the dir can't be created/written — then callers fall back to plaintext-refusal
+    (fail closed), never a silent plaintext write."""
+    from cryptography.fernet import Fernet
+
+    path = _key_file()
+    try:
+        if path.exists():
+            return path.read_text().strip()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = Fernet.generate_key().decode()
+        path.write_text(key)
+        os.chmod(path, 0o600)
+        return key
+    except OSError:
+        return None
+
+
 @lru_cache(maxsize=1)
 def _cipher():
-    key = os.getenv("LINEAGE_SECRET_KEY")
+    key = os.getenv("LINEAGE_SECRET_KEY") or _file_key()
     if not key:
         return None
-    from cryptography.fernet import Fernet  # deferred: dev w/o a key imports nothing
+    from cryptography.fernet import Fernet
     return Fernet(key.encode())
 
 
@@ -74,36 +107,50 @@ def open_(stored: str | None) -> str | None:
 
 
 def demo() -> None:
-    # no key → plaintext passthrough both ways (dev default).
+    import tempfile
+    from cryptography.fernet import Fernet
+
+    tmp = tempfile.mkdtemp()
+
+    # zero config: no env key, but a writable secret dir → auto-persisted key,
+    # so values are ENCRYPTED by default (not plaintext) and round-trip.
     os.environ.pop("LINEAGE_SECRET_KEY", None)
+    os.environ["LINEAGE_SECRET_DIR"] = tmp
     _cipher.cache_clear()
-    assert seal("sk-abc") == "sk-abc"
-    assert open_("sk-abc") == "sk-abc"   # legacy plaintext opens unchanged
+    assert configured()
+    sealed = seal("sk-abc")
+    assert sealed and sealed.startswith(_MARKER) and "sk-abc" not in sealed
+    assert open_(sealed) == "sk-abc"
     assert seal(None) is None and seal("") == ""
-    # fail closed: a real key with require=True must never be stored plaintext.
+    assert open_("sk-plain") == "sk-plain"   # legacy plaintext still opens unchanged
+    # the key persists: a fresh cipher reads the same file and opens old values.
+    _cipher.cache_clear()
+    assert open_(sealed) == "sk-abc"
+
+    # no writable dir AND no env key → fail closed, never a silent plaintext write.
+    blocker = os.path.join(tmp, "not-a-dir")
+    open(blocker, "w").close()
+    os.environ["LINEAGE_SECRET_DIR"] = os.path.join(blocker, "nope")
+    _cipher.cache_clear()
+    assert not configured()
+    assert seal("sk-abc") == "sk-abc"       # non-required value: passthrough ok
     try:
         seal("sk-live", require=True)
         raise AssertionError("must refuse to store a real key with no vault")
     except RuntimeError:
         pass
-
-    # with a key → round-trips, and the stored form is opaque (not the key).
-    from cryptography.fernet import Fernet
-    os.environ["LINEAGE_SECRET_KEY"] = Fernet.generate_key().decode()
-    _cipher.cache_clear()
-    sealed = seal("sk-secret-123")
-    assert sealed and sealed.startswith(_MARKER) and "sk-secret" not in sealed
-    assert open_(sealed) == "sk-secret-123"
-    assert open_("sk-plain") == "sk-plain"   # still passes legacy plaintext through
-
-    # a sealed value with no key must fail closed, never return garbage.
-    os.environ.pop("LINEAGE_SECRET_KEY", None)
-    _cipher.cache_clear()
     try:
-        open_(sealed)
+        open_(sealed)                       # a sealed value with no key is unrecoverable
         raise AssertionError("must refuse to open a sealed value with no key")
     except RuntimeError:
         pass
+
+    # explicit env key overrides the file and round-trips.
+    os.environ["LINEAGE_SECRET_KEY"] = Fernet.generate_key().decode()
+    _cipher.cache_clear()
+    s2 = seal("sk-secret-123")
+    assert s2 and s2.startswith(_MARKER) and "sk-secret" not in s2
+    assert open_(s2) == "sk-secret-123"
     print("vault.demo ok")
 
 

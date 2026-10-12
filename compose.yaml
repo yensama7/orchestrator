@@ -33,10 +33,10 @@ services:
       # owner URL, used once on boot to apply the idempotent schema (drift-proof)
       MIGRATE_DATABASE_URL: postgres://lineage:lineage@db:5432/lineage
       # secret-at-rest key for API keys entered in Settings (§P5, vault.py).
-      # Generate once: `python -m lineage.security.vault --keygen`, then export it
-      # (e.g. in a .env file next to this compose). Without it, storing a real API
-      # key fails closed rather than writing plaintext — fixture/local runs are
-      # unaffected since they need no key.
+      # OPTIONAL: when unset, the backend auto-generates one and persists it to
+      # the `secrets` volume below (~/.lineage), so keys are encrypted at rest
+      # with zero config. Set it explicitly (e.g. in a .env next to this compose)
+      # to pin the key yourself or point at a KMS-derived key.
       LINEAGE_SECRET_KEY: ${LINEAGE_SECRET_KEY:-}
       # One OpenRouter key drives every OpenRouter model (any `vendor/model` slug
       # assigned to any agent) — no per-model key entry in Settings. When a model
@@ -49,6 +49,10 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
     ports:
       - "8000:8000"
+    volumes:
+      # persists the auto-generated secret-at-rest key across restarts; drop this
+      # volume and stored API keys become unrecoverable (as with any lost key).
+      - secrets:/home/app/.lineage
     depends_on:
       db:
         condition: service_healthy
@@ -65,13 +69,12 @@ services:
       backend:
         condition: service_healthy
 
-  # Opt-in local-model runtime. `docker compose --profile local up` starts it;
-  # the Settings → Local models panel then detects it, lists/pulls models, and
-  # the §P2 router can send cheap nodes here at zero marginal cost. Omitted from
-  # the default `up` so the stack stays light for users who don't want it.
+  # Local-model runtime. Starts with the default `docker compose up`; the
+  # Settings → Local models panel detects it, lists/pulls models, and the §P2
+  # router can send cheap nodes here at zero marginal cost. No models are pulled
+  # until you download one, so an idle Ollama is cheap.
   ollama:
     image: ollama/ollama:latest
-    profiles: ["local"]
     volumes:
       - ollama:/root/.ollama
     ports:
@@ -87,3 +90,4 @@ services:
 volumes:
   pgdata:
   ollama:
+  secrets:

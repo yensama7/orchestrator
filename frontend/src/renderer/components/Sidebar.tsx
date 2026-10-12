@@ -15,7 +15,6 @@ import { useRun } from "@/hooks/use-run";
 import { useRunStore } from "@/stores/run-store";
 import { useUiStore } from "@/stores/ui-store";
 import { ModeBadge } from "@/components/ModeBadge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 // Nav mirrors the old App.tsx VIEWS, with Board replacing "New run" as the
 // landing. Wired to the router via <Link>; `to` paths match the file-based
@@ -80,22 +79,23 @@ export function Sidebar() {
 			{/* Project / run section — live run switcher + mode + spec + security footer. */}
 			<div className="border-t border-border px-3 py-3 text-xs">
 				{runs && runs.runs.length > 0 ? (
-					<Select
+					// Native select: closes on its own and the OS manages the popup, so
+					// there's no portal/overlay to get stuck open. [&>option] colors keep
+					// the list readable in dark mode (see Settings.selectCls).
+					<select
 						value={selectedRun ?? runs.current}
-						onValueChange={(v) => setSelectedRun(v === runs.current ? null : v)}
+						onChange={(e) =>
+							setSelectedRun(e.target.value === runs.current ? null : e.target.value)
+						}
+						className="h-control-form w-full rounded-md border border-border bg-input/50 px-2 text-xs text-foreground outline-none [&>option]:bg-popover [&>option]:text-popover-foreground"
 					>
-						<SelectTrigger size="sm" className="w-full">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{runs.runs.map((r) => (
-								<SelectItem key={r.id} value={r.id}>
-									{r.name} · {r.status} · {r.mode}
-									{r.current ? " · current" : ""}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
+						{runs.runs.map((r) => (
+							<option key={r.id} value={r.id}>
+								{r.name} · {r.status} · {r.mode}
+								{r.current ? " · current" : ""}
+							</option>
+						))}
+					</select>
 				) : (
 					<div className="font-medium text-foreground">{run?.label ?? "No run selected"}</div>
 				)}

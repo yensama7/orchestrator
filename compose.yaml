@@ -54,7 +54,7 @@ services:
         condition: service_healthy
 
   web:
-    build: ./web
+    build: ./frontend
     environment:
       # nginx reverse-proxies /api to this upstream (§7). Same-origin, so the
       # backend needs no CORS in this topology.

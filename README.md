@@ -46,7 +46,8 @@ export LINEAGE_SECRET_KEY=$(python -m lineage.security.vault --keygen)
 | **One-command onboarding** — `python -m lineage.onboarding` → a verified `live` build, no key | ✅ §P5, CI-proven |
 | **API keys sealed at rest** — envelope encryption (KMS-swappable) when `LINEAGE_SECRET_KEY` set | ✅ §P5, self-checked |
 | **Migrations** — forward-only `db/migrations/NNN_*.sql` + runner, tested on a seeded DB in CI | ✅ §P5 |
-| Six views (New run, Lineage, Memory, Agents, Dissent, Workspace) | ✅ §19, tokens §12 |
+| Views (Board, New run, Lineage, Memory, Agents, Dissent, Workspace) | ✅ §19, tokens §12 |
+| **Live Kanban board** — runs bucketed Queued→Working→Dissent→Verifying→Verified→Superseded, re-derived live from SSE | ✅ Expert home, pure-fn mapping self-checked |
 | Header spend rail + quota, rail-nav, **live SSE ticker** (tails episodic_events) | ✅ |
 | **Postgres persistence** — every view DB-backed, mutated live by the engine | ✅ |
 | **Tenancy/RLS** — enabled + **forced**, app connects as `NOBYPASSRLS` role (§18.4) | ✅ isolation verified |
@@ -117,7 +118,7 @@ Everything runs offline with sensible fallbacks; these get *better*, not
 - **Kernel-enforced isolation** — `SANDBOX_DOCKER=1` + a `runsc` (gVisor)
   runtime turns the sandbox pool into read-only, network-none containers.
 
-Grep the deliberate stand-ins: `grep -rn "ponytail:" backend web`.
+Grep the deliberate stand-ins: `grep -rn "ponytail:" backend frontend`.
 
 ## Verify
 
@@ -143,8 +144,16 @@ backend/lineage/
                  · manifest · registry · drift        (§5, §18.2, §20.7)
   security/      broker · taint · egress · scan       (§11)
   db/            migrations/ · tenancy (runner) · seed (§18.4, §P5)
-  api/           main (routes + SSE)
-web/src/         shell (App) · components · CodeEditor · lang/registry (§13)
-                 · views/{newrun,lineage,memory,agents,dissent,workspace}
+  api/           main (routes + SSE) · export_openapi (typed-contract source)
+frontend/        Vite + React 19 + Tailwind + shadcn, TanStack Router (hash)
+  src/renderer/  routes/ (_shell + board/lineage/memory/agents/dissent/
+                 workspace/settings/run.$runId) · components/{ui,views} ·
+                 Board · CodeEditor + lang-registry (§13) · stores (zustand)
+                 · lib (api hooks, board-presentation) · styles (graphite tokens)
+  src/api/       schema.ts — generated from backend OpenAPI (`npm run api`)
+DESIGN.md        adapted graphite design system (shell, board, status lanes)
 compose.yaml     db (pgvector, RLS applied on boot) + backend (app role) + web
 ```
+
+`web` (the nginx service) builds from `./frontend`: `npm run build` → static
+SPA served on :5173, reverse-proxying `/api` to `backend:8000`.

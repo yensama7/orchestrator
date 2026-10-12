@@ -12,9 +12,9 @@ venv/
 *.egg-info/
 
 # Node / web
-web/node_modules/
-web/dist/
-web/.vite/
+node_modules/
+dist/
+.vite/
 *.log
 npm-debug.log*
 

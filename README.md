@@ -2,7 +2,7 @@
 
 Multi-agent build orchestration with supersession-aware memory, a deterministic
 arbiter, and a dissent ledger. This repo is the **M1 vertical slice** of
-[`plan.md`](./plan.md): the console (faithful to `references/`), a typed
+[`plan.md`](./docs/plan.md): the console (faithful to `references/`), a typed
 backend, the real DB schema, and a compose gate — built first because the plan
 says to (§17).
 

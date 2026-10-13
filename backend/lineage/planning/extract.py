@@ -36,7 +36,11 @@ _SYS = (
 # canonical domain set (join key for roster/agent_scores/lineage grouping) and the
 # synonyms a free-thinking model tends to emit. The prompt is unconstrained — the
 # model reasons however it likes; we only normalise the *label* so "e-commerce",
-# "web shop", "Commerce" all collapse to one bucket. Unknown → "other".
+# "web shop", "Commerce" all collapse to one bucket. A domain we don't recognise
+# is NOT flattened to "other" (that was the bug — qwen's real inference, e.g.
+# "weather" or "iot", vanished); it keeps its own slug bucket. Templates fall back
+# to generic for unknown domains anyway (plan.select_template), so a novel domain
+# is safe as a join key. Only an empty/missing domain becomes "other".
 _CANON = {"commerce", "saas", "api", "mobile", "content", "tool", "data", "other"}
 _SYN = {
     "ecommerce": "commerce", "e-commerce": "commerce", "retail": "commerce",
@@ -55,6 +59,8 @@ _SYN = {
 
 def canon_domain(d: str) -> str:
     d = (d or "").strip().lower()
+    if not d:
+        return "other"
     if d in _CANON:
         return d
     if d in _SYN:
@@ -62,7 +68,9 @@ def canon_domain(d: str) -> str:
     for kw, canon in _SYN.items():  # substring: "e-commerce storefront" → commerce
         if kw in d:
             return canon
-    return "other"
+    # novel but real: keep it as its own bucket (slugified join key), don't erase it
+    slug = re.sub(r"[^a-z0-9]+", "-", d).strip("-")
+    return slug or "other"
 
 
 async def extract(brief: str) -> SpecFingerprint:
@@ -76,8 +84,7 @@ async def extract(brief: str) -> SpecFingerprint:
         if not data.get("domain"):
             return _heuristic(brief)
         data["domain"] = canon_domain(data["domain"])  # free reasoning, fixed label
-        return SpecFingerprint(**{k: v for k, v in data.items()
-                                  if k in SpecFingerprint.model_fields})
+        return SpecFingerprint(**data)  # extra=allow: keep the model's extra fields
     except Exception:
         return _heuristic(brief)  # CLI missing/unauthed or bad JSON → keyword fallback
 
@@ -125,8 +132,15 @@ def demo() -> None:
     assert canon_domain("E-Commerce") == "commerce"
     assert canon_domain("web shop") == "commerce"
     assert canon_domain("analytics") == "data"
-    assert canon_domain("wildly novel thing") == "other"
+    # a novel domain keeps its own slug bucket — it is NOT erased to "other"
+    assert canon_domain("wildly novel thing") == "wildly-novel-thing"
+    assert canon_domain("weather") == "weather"
+    assert canon_domain("") == "other" and canon_domain(None) == "other"
     assert canon_domain("saas") == "saas"
+
+    # extra=allow: a model that attaches a domain-specific field keeps it
+    rich = SpecFingerprint(domain="weather", realtime=True)
+    assert rich.domain == "weather" and rich.realtime is True, rich
 
     # a model that answers is honored — extraction must NOT override it with the
     # keyword heuristic (this is the "always commerce" regression guard).

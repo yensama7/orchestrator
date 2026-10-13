@@ -5,9 +5,9 @@ bringing the stack up (see README). No framework, no fixtures."""
 from lineage import mode as runmode
 from lineage.arbitration import arbiter, confidence, retention
 from lineage.contracts import Envelope, Intent
-from lineage.execution import routing, runner, scheduler, verify
+from lineage.execution import orchestrator, routing, runner, scheduler, verify
 from lineage.memory import drift, embed, manifest, pitfalls, registry
-from lineage.planning import _pick, extract, plan
+from lineage.planning import _pick, extract, plan, reforge
 from lineage.security import broker, egress, redact, scan, taint, vault
 from lineage.transports import api as api_transport, fixture as fixture_transport
 
@@ -26,12 +26,14 @@ def test_registry(): registry.demo()
 def test_drift(): drift.demo()
 def test_egress(): egress.demo()
 def test_taint(): taint.demo()
+def test_taint_propagation(): orchestrator.demo()
 def test_broker(): broker.demo()
 def test_scan(): scan.demo()
 def test_redact(): redact.demo()
 def test_pick(): _pick.demo()
 def test_extract(): extract.demo()
 def test_plan(): plan.demo()
+def test_reforge(): reforge.demo()
 def test_api_routing(): api_transport.demo()
 def test_mode(): runmode.demo()
 def test_vault(): vault.demo()

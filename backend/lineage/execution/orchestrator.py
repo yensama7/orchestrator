@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from uuid import UUID
 
 from ..arbitration.arbiter import Arbiter
@@ -26,9 +27,11 @@ from ..memory.embed import embed
 from . import worktree
 from ..memory.retrieval import retrieve
 from ..planning.plan import build_dag
+from ..planning import reforge
 from ..security.redact import redact
+from ..security.taint import TaintSet, is_untrusted_source
 from ..transports import Prompt, build as build_transport
-from ..transports.base import Completion
+from ..transports.base import Completion, Usage
 from . import leases, routing, scheduler, verify
 from .pool import SandboxPool
 
@@ -38,6 +41,9 @@ _running: set[str] = set()
 # so token cost scales with relevance, not workspace size.
 # ponytail: module dict instead of threading run_id through every signature.
 _ws_ctx: dict[str, dict] = {}
+# per-run taint set (§11): untrusted workspace artifacts and the nodes that
+# consume them. Lives beside _ws_ctx, torn down with it in _run's finally.
+_taint_ctx: dict[str, TaintSet] = {}
 
 
 async def start(run_id: UUID) -> bool:
@@ -53,6 +59,7 @@ async def _run(run_id: UUID) -> None:
     try:
         fp, ceiling = await _load(run_id)
         _ws_ctx[str(run_id)] = await _worktree_chunks(run_id)
+        _taint_ctx[str(run_id)] = _seed_taint(_ws_ctx[str(run_id)])
         roster = await _roster()
         if not roster:
             await mem.append_episodic(run_id, "ticker",
@@ -80,7 +87,7 @@ async def _run(run_id: UUID) -> None:
 
         # run-level mode evidence (phases.md §P0): echo poisons `live`, a behavioral
         # verifier is required for it. Nodes mutate this as they run.
-        flags = {"echo": False, "behavioral": False}
+        flags = {"echo": False, "behavioral": False, "tainted": False}
         halted = False
         # warm sandbox pool for behavioral verification (§P1b, §14). One sandbox is
         # handed to each node to execute its proposals' produced files; sized to the
@@ -121,23 +128,32 @@ async def _run(run_id: UUID) -> None:
                 await _bump_vind(agent)
         if not halted:
             await mem.append_episodic(run_id, "ticker", {"key": "passed", "text": "run complete"})
+            # §11: a run that consumed untrusted (tainted) input is not promoted to a
+            # reusable template — injected dependency content must not launder itself
+            # into knowledge the next run inherits. The run still completes and its
+            # files stay browsable; only the durable template surface is withheld.
+            if flags["tainted"]:
+                await mem.append_episodic(run_id, "ticker",
+                    {"key": "held", "text": "tainted input — template promotion withheld"})
             # §5/§17 M5: promote the completed run into a reusable template so the
             # next run's `match` can inherit from it. Gated + idempotent in distil;
             # off the critical path, so a failure here never fails the run.
-            try:
-                man = manifest.parse(await worktree.read_files(run_id))
-                if await distil(run_id, name or "untitled run", man):
+            else:
+                try:
+                    man = manifest.parse(await worktree.read_files(run_id))
+                    if await distil(run_id, name or "untitled run", man):
+                        await mem.append_episodic(run_id, "ticker",
+                            {"key": "planned", "text": "distilled → template"})
+                except Exception as e:  # noqa: BLE001
                     await mem.append_episodic(run_id, "ticker",
-                        {"key": "planned", "text": "distilled → template"})
-            except Exception as e:  # noqa: BLE001
-                await mem.append_episodic(run_id, "ticker",
-                    {"key": "held", "text": f"distil skipped: {str(e)[:60]}"})
+                        {"key": "held", "text": f"distil skipped: {str(e)[:60]}"})
     except Exception as e:
         await mem.append_episodic(run_id, "ticker", {"key": "failed", "text": str(e)[:90]})
     finally:
         if pool is not None:
             await pool.shutdown()
         _ws_ctx.pop(str(run_id), None)
+        _taint_ctx.pop(str(run_id), None)
         _running.discard(str(run_id))
 
 
@@ -146,6 +162,7 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster, flags: dict, pool: Sand
     agents = await _assign(run_id, roster, node, cpv, prior_failures)
     if not agents:
         return
+    agents = _with_refuter(agents, roster, node)
     held = await leases.acquire_all(run_id, node.id, agents[0]["agent"], node.writes, ttl_seconds=90)
     if held is None:
         await mem.append_episodic(run_id, "lease", {"node": node.id, "text": "deferred"})
@@ -154,17 +171,22 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster, flags: dict, pool: Sand
     # each proposal's produced files in it, and the resurrect loop re-verifies in it.
     sb = await pool.acquire()
     try:
-        proposals, per_agent = await _propose(run_id, node, fp, agents)
-        # §18.3 stage 2: verify every proposal *before* arbitration so a passing
-        # test can beat a vote. Behavioral verifiers execute the produced files;
-        # the winner's result is reused as its status.
-        vres = {p.id: await verify.run(node.acceptance, p.body, sb) for p in proposals}
-        for p in proposals:
-            p.verifier_passes = vres[p.id].passed
-        decision = arb.decide(fp.domain, proposals)
-        if decision.held:
-            await mem.append_episodic(run_id, "ticker", {"key": "held", "text": f"{node.id} — arbiter tie"})
-        await _record_dissent(run_id, node.id, proposals, decision)
+        # §11 taint: select the workspace chunks this node consumes once (same query
+        # for every agent on the node), propagate taint from them, and reuse the text
+        # so _dispatch doesn't re-embed/re-select per agent. A node that pulled an
+        # untrusted (dependency/lock) chunk runs writes-disabled: its decision is
+        # barred from durable cross-run memory below.
+        qvec = await embed(f"{node.role} {node.intent}")
+        ws_text, used_labels = _relevant_workspace(str(run_id), qvec)
+        ts = _taint_ctx.get(str(run_id))
+        node_tainted = False
+        if ts is not None:
+            ts.derive(node.id, used_labels)
+            node_tainted = ts.call_policy([node.id])["tainted"]
+            flags["tainted"] = flags["tainted"] or node_tainted
+
+        decision, proposals, per_agent, vres = await _adjudicate_once(
+            run_id, node, fp, arb, agents, ws_text, sb)
 
         winner = next((p for p in proposals if p.id == decision.winner), proposals[0])
         status = "passed" if vres[winner.id].passed else "failed"
@@ -196,6 +218,18 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster, flags: dict, pool: Sand
                 winner_agent, winner_body = revived
                 status = "passed"
 
+        # move 1: the node failed *hard* — the winner failed and every dissent was
+        # refuted, so no proposed answer to the node *as specified* passes. That
+        # indicts the decomposition, not the answer. Contest the plan and reforge
+        # this node once into a different shape (reforge.split); if the reforged
+        # sub-nodes all build, the reforge is vindicated and becomes the decision.
+        if status == "failed" and node_behavioral and reforge_enabled() and reforge.reforgeable(node):
+            reforged = await _reforge_node(run_id, node, fp, arb, roster, flags, cpv,
+                                           prior_failures, sb)
+            if reforged:
+                winner_agent, winner_body = reforged
+                status = "passed"
+
         # §P2: a verified result = a node that reached a behaviorally-verified pass.
         # Echo can't clear a behavioral gate (verify.py fails it closed), so this
         # counter is 0 on a pure-echo run without any mode check. Denominator of
@@ -210,13 +244,15 @@ async def _node(run_id, node: NodeSpec, fp, arb, roster, flags: dict, pool: Sand
 
         # record every passed decision, not a hardcoded three — this is what
         # retrieve() feeds back into later prompts, so the memory has to be real.
+        # §11: a tainted node's decision is writes-disabled — it never enters durable
+        # semantic memory, so untrusted input can't poison what later runs retrieve.
         choice = winner_body.get("choice")
-        if status == "passed" and choice:
+        if status == "passed" and choice and not node_tainted:
             subject = node.id.split(".")[0]
             await mem.write_semantic(run_id, subject, f"{subject} = {choice}",
                                      rationale=node.intent, decided_by=winner_agent)
         await mem.append_episodic(run_id, "node", {
-            "node": node.id, "winner": winner_agent, "status": status,
+            "node": node.id, "winner": winner_agent, "status": status, "tainted": node_tainted,
             "stage": decision.stage, "text": f"{node.id} · {winner_agent} · {status}"})
     finally:
         await pool.release(sb)
@@ -248,12 +284,82 @@ async def _assign(run_id, roster: dict, node: NodeSpec, cpv: dict, prior_failure
     return [chosen]
 
 
-async def _propose(run_id, node, fp, agents) -> tuple[list[Proposal], dict]:
+async def _adjudicate_once(run_id, node: NodeSpec, fp, arb, agents, ws_text: str, sb):
+    """Shared decision core: dispatch proposals (+refuter), verify each in the
+    sandbox *before* arbitration (so a passing test beats a vote, §18.3 stage 2),
+    arbitrate deterministically, and record every loser to the dissent ledger.
+    Used by the main walk and by each reforged sub-node (move 1). Returns
+    (decision, proposals, per_agent, vres)."""
+    proposals, per_agent = await _propose(run_id, node, fp, agents, ws_text, sb)
+    vres = {p.id: await verify.run(node.acceptance, p.body, sb) for p in proposals}
+    for p in proposals:
+        p.verifier_passes = vres[p.id].passed
+    decision = arb.decide(fp.domain, proposals)
+    if decision.held:
+        await mem.append_episodic(run_id, "ticker", {"key": "held", "text": f"{node.id} — arbiter tie"})
+    await _record_dissent(run_id, node.id, proposals, decision)
+    return decision, proposals, per_agent, vres
+
+
+# ── move 2: adversarial proposer (the refuter) ──────────────────────────────
+# Dissent used to be incidental — you hoped two agents happened to disagree. The
+# refuter makes it deliberate: a behavioral single-agent node gets one extra
+# proposer whose job is to produce the strongest *different* decision. It flows
+# through verify + arbiter like any proposal; low agreement keeps it from winning
+# a stage-3 popularity vote, so it can only win by its code actually passing
+# (stage 2). When it loses it lands in the dissent ledger (_record_dissent), where
+# a later winner-failure resurrects and — if its files now pass — vindicates it.
+# ponytail: v1 proposes the strongest alternative blind. Two-phase "attack the
+# actual leading proposal" (propose → pick leader → refute its text → re-verify)
+# is the upgrade path once this earns its keep.
+_ADVERSARIAL = (
+    "ADVERSARIAL ROLE: you are the refuter. The obvious/majority approach to this "
+    "node is probably fragile or wrong. Propose the strongest *different* decision — "
+    "a distinct `choice` — that you can defend, and make its files actually pass the "
+    "acceptance checks. Do not restate the obvious answer; surface the alternative a "
+    "consensus would overlook.")
+
+
+def adversarial_enabled() -> bool:
+    return os.getenv("ADVERSARIAL_PROPOSER", "1") != "0"
+
+
+def _dispatch_stance(a: dict) -> str:
+    """The adversarial directive for a refuter, empty for a normal proposer. Lives
+    in the variable tail so a refuter never evicts the shared cacheable prefix."""
+    return _ADVERSARIAL if a.get("adversarial") else ""
+
+
+def _refuter_base(roster: dict) -> dict | None:
+    """Clone the roster's cheapest-tier agent as the refuter's transport, so it
+    degrades to the free echo exactly like every other proposer. None if empty."""
+    all_agents = [a for lst in roster.values() for a in lst]
+    if not all_agents:
+        return None
+    cheapest = min(all_agents,
+                   key=lambda a: routing.TIERS.index(routing.model_tier(a["model"], a["transport"])))
+    return {**cheapest, "agent": "refuter", "adversarial": True}
+
+
+def _with_refuter(agents: list[dict], roster: dict, node: NodeSpec) -> list[dict]:
+    """Append a refuter to a behavioral single-agent node. Skipped when: disabled,
+    the node isn't behavioral (a resurrected dissent can only be *proven* right by
+    running it), or the node already went to multi-agent consensus (it has real
+    dissent diversity already). ADVERSARIAL_PROPOSER=0 reverts to pre-move-2."""
+    if len(agents) != 1 or not adversarial_enabled():
+        return agents
+    if not verify.any_behavioral(node.acceptance):
+        return agents
+    base = _refuter_base(roster)
+    return agents + [base] if base else agents
+
+
+async def _propose(run_id, node, fp, agents, ws_text: str, sb) -> tuple[list[Proposal], dict]:
     proposals: list[Proposal] = []
     per_agent: dict[str, dict] = {}
     for a in agents:
         await _set_state([a["agent"]], "running")
-        comp = await _dispatch(a, node, fp, run_id)
+        comp = await _dispatch_to_green(a, node, fp, run_id, ws_text, sb)
         per_agent[a["agent"]] = {
             "tokens": comp.usage.input_tokens + comp.usage.output_tokens,
             "cost": comp.usage.usd,
@@ -283,13 +389,70 @@ async def _agreements(proposals: list[Proposal]) -> list[float]:
     return out
 
 
-async def _dispatch(a: dict, node: NodeSpec, fp: SpecFingerprint, run_id) -> Completion:
+# ── move 3: iterate-to-green (the repair loop) ──────────────────────────────
+# A one-shot JSON blob is a weak coding agent — a real one runs the test, reads
+# the failure, and fixes it. This gives a behavioral node that loop without a full
+# ACP/CLI harness: dispatch → run the *actual* verifier in the sandbox → feed the
+# failure (and the prior files) back → let the model correct it, bounded by
+# REPAIR_ROUNDS and (coarsely) the run ceiling. The arbiter/dissent layer above is
+# untouched — it just judges a stronger proposal. The echo stub ignores prompts,
+# so a simulated proposal is never looped (it can't repair and stays `simulated`).
+# ponytail: this drives repair over complete(); the ceiling is a real tool-using
+# agent (claude-code / ACP, like agent-orchestrator) owning its own run-edit loop.
+def repair_rounds() -> int:
+    try:
+        return max(0, int(os.getenv("REPAIR_ROUNDS", "2")))
+    except ValueError:
+        return 2
+
+
+def _usage_sum(acc: Usage | None, comp: Completion) -> Usage:
+    """Accumulate usage across repair rounds so spend/tokens stay honest — every
+    round is a real model call; charging only the last would under-count."""
+    u = comp.usage
+    if acc is None:
+        return Usage(u.input_tokens, u.output_tokens, u.cached_tokens, u.usd)
+    return Usage(acc.input_tokens + u.input_tokens, acc.output_tokens + u.output_tokens,
+                 acc.cached_tokens + u.cached_tokens, acc.usd + u.usd)
+
+
+def _repair_feedback(summary: str, body: dict) -> str:
+    """The verifier's failure + the attempt's own files, so the model *edits*
+    rather than regenerates blind. Files are capped so a repair round can't blow
+    the token budget on a huge rewrite."""
+    files = body.get("files") or {}
+    prev = "\n".join(f"--- {p} ---\n{str(c)[:2000]}" for p, c in list(files.items())[:8])
+    return ("VERIFIER FAILED on your last attempt — fix the code and return the FULL "
+            f"corrected files map (same JSON contract).\nfailure: {summary}\n"
+            f"YOUR PREVIOUS FILES:\n{prev}")
+
+
+async def _dispatch_to_green(a: dict, node: NodeSpec, fp: SpecFingerprint, run_id,
+                             ws_text: str, sb) -> Completion:
+    """Dispatch, then (for a behavioral node) repair-loop against the real verifier
+    until it passes or the round budget runs out. Returns one Completion whose usage
+    is the sum across every round. A non-behavioral node, a disabled loop, or an
+    echo (simulated) proposal returns the single first completion unchanged."""
+    comp = await _dispatch(a, node, fp, run_id, ws_text)
+    if comp.simulated or repair_rounds() == 0 or not verify.any_behavioral(node.acceptance):
+        return comp
+    total = _usage_sum(None, comp)
+    for _ in range(repair_rounds()):
+        vres = await verify.run(node.acceptance, _body(comp, node), sb)
+        if vres.passed:
+            break
+        comp = await _dispatch(a, node, fp, run_id, ws_text,
+                               feedback=_repair_feedback(vres.summary, _body(comp, node)))
+        total = _usage_sum(total, comp)
+    comp.usage = total
+    return comp
+
+
+async def _dispatch(a: dict, node: NodeSpec, fp: SpecFingerprint, run_id, chunks: str,
+                    feedback: str = "") -> Completion:
     profile = await _role_profile(node.role)
     must_not = f"MUST NOT: {', '.join(node.constraints)}" if node.constraints else ""
-    query = f"{node.role} {node.intent}"
-    qvec = await embed(query)
-    prior = await _prior_decisions(query)
-    chunks = _relevant_workspace(str(run_id), qvec)
+    prior = await _prior_decisions(f"{node.role} {node.intent}")
     # §P1b: a node that must be behaviorally verified has to *produce the artifacts*
     # that get built/tested — tell the model to emit them as a files map. Without
     # this the loop is inert (nothing to execute). The echo stub ignores it and so
@@ -302,13 +465,20 @@ async def _dispatch(a: dict, node: NodeSpec, fp: SpecFingerprint, run_id) -> Com
         "so they can be built and tested — no prose, no placeholders."
         if node.writes and verify.any_behavioral(node.acceptance) else ""
     )
+    # move 2: the refuter carries an adversarial stance; every other proposer's
+    # tail is unchanged, so its cacheable prefix still hits (the stance is in the
+    # variable tail, not the stable prefix).
+    stance = _dispatch_stance(a)
     prompt = Prompt(
         # cacheable prefix: identical for every node/agent in the run (domain +
         # file tree), so the provider serves it from cache after the first call.
         stable=_ws_stable(str(run_id), fp.domain),
         # variable tail: role, constraints, retrieved memory, and the chunks that
         # match *this* node — the only part that changes call to call.
-        system="\n".join(x for x in (f"role={node.role}", profile, must_not, prior, chunks, contract) if x),
+        # move 3: `feedback` is the verifier's failure from the prior attempt on a
+        # repair round — empty on the first (and every non-behavioral) dispatch.
+        system="\n".join(x for x in (f"role={node.role}", profile, must_not, prior,
+                                     chunks, contract, stance, feedback) if x),
         user=f"node {node.id}: {node.intent} for {fp.subdomain or fp.domain}")
     try:
         return await build_transport(a["model"], a["transport"], a.get("key")).complete(prompt)
@@ -362,22 +532,35 @@ def _ws_stable(run_id: str, domain: str) -> str:
     return "\n".join(x for x in (f"domain={domain}", ctx.get("header")) if x)
 
 
-def _relevant_workspace(run_id: str, qvec, k: int = 6, budget: int = 6000) -> str:
+def _seed_taint(ctx: dict) -> TaintSet:
+    """A run's taint set, pre-marked with every untrusted (dependency/lock) file in
+    the imported workspace (§11). Nodes inherit taint by consuming these chunks."""
+    ts = TaintSet()
+    for ch in (ctx or {}).get("chunks") or []:
+        if is_untrusted_source(ch["label"]):
+            ts.mark(ch["label"])
+    return ts
+
+
+def _relevant_workspace(run_id: str, qvec, k: int = 6, budget: int = 6000) -> tuple[str, list[str]]:
     """Rank chunks by cosine to the node query; send only the top few under a char
-    budget. Tree lives in the stable prefix (_ws_stable), so this is chunks only."""
+    budget. Returns (prompt text, labels of the chunks actually included) so the
+    caller can propagate taint from exactly what this node consumed. Tree lives in
+    the stable prefix (_ws_stable), so this is chunks only."""
     ctx = _ws_ctx.get(run_id) or {}
     chunks = ctx.get("chunks") or []
     if not chunks:
-        return ""
+        return "", []
     scored = sorted(chunks, key=lambda ch: sum(a * b for a, b in zip(ch["vec"], qvec)), reverse=True)
-    parts, used = [], 0
+    parts, labels, used = [], [], 0
     for ch in scored[:k]:
         block = f"\n--- {ch['label']} ---\n{ch['text']}"
         if used + len(block) > budget:
             break
         parts.append(block)
+        labels.append(ch["label"])
         used += len(block)
-    return "".join(parts)
+    return "".join(parts), labels
 
 
 async def _role_profile(role: str) -> str:
@@ -502,6 +685,77 @@ async def _bump_vind(agent: str) -> None:
     path (arbitration/dissent.py) so both triggers compute it identically."""
     from ..arbitration.dissent import recompute_vindication
     await recompute_vindication(agent)
+
+
+# ── move 1: contest + reforge the decomposition ─────────────────────────────
+def reforge_enabled() -> bool:
+    return os.getenv("REFORGE_PLAN", "1") != "0"
+
+
+async def _reforge_node(run_id, node: NodeSpec, fp, arb, roster, flags: dict,
+                        cpv: dict, prior_failures: int, sb) -> tuple[str, dict] | None:
+    """A hard-failed node's decomposition is contested: record a plan-level dissent
+    (stage 5, dissenter 'decomposition'), then run reforge.split's sub-nodes once
+    through the same adjudicate→verify→resurrect core. If every sub-node reaches a
+    behavioral pass the reforge is *vindicated* — settle it, merge the sub-nodes'
+    files, and return ('decomposition', merged) as the node's effective decision.
+    Any sub-node that can't pass refutes the reforge (the plan shape was no better)
+    and the node stays failed. Bounded to one reforge per node: sub-nodes never
+    reforge again (this is only reached from the main walk)."""
+    subs = reforge.split(node)
+    pd_id = await _record_plan_dissent(run_id, node, subs)
+    merged_files: dict = {}
+    for sub in subs:
+        agents = _with_refuter(await _assign(run_id, roster, sub, cpv, prior_failures), roster, sub)
+        if not agents:
+            await _settle_plan_dissent(run_id, pd_id, "refuted", node.id, f"no agent for {sub.id}")
+            return None
+        decision, proposals, per_agent, vres = await _adjudicate_once(
+            run_id, sub, fp, arb, agents, "", sb)
+        # spend is real money on any transport but echo — never lose it, even on
+        # this rare fallback path. (ponytail: per-agent pass credit for reforged
+        # sub-nodes is skipped; the leaderboard under-counts a reforge slightly.)
+        await _charge(run_id, sum(u["cost"] for u in per_agent.values()))
+        flags["echo"] = flags["echo"] or any(u["sim"] for u in per_agent.values())
+        flags["behavioral"] = flags["behavioral"] or verify.any_behavioral(sub.acceptance)
+
+        winner = next((p for p in proposals if p.id == decision.winner), proposals[0])
+        status = "passed" if vres[winner.id].passed else "failed"
+        body = winner.body
+        if status == "failed":
+            revived = await _resurrect_and_settle(run_id, sub, sb)
+            if revived:
+                _, body = revived
+                status = "passed"
+        if status != "passed":
+            await _settle_plan_dissent(run_id, pd_id, "refuted", node.id, f"reforge failed at {sub.id}")
+            return None
+        merged_files.update(body.get("files") or {})
+        await _persist_files(run_id, body.get("files") or {})
+
+    await _settle_plan_dissent(run_id, pd_id, "vindicated", node.id,
+                               f"decomposition reforged → {len(subs)} nodes, all passed")
+    return "decomposition", {"choice": f"reforged({node.id})", "files": merged_files}
+
+
+async def _record_plan_dissent(run_id, node: NodeSpec, subs: list[NodeSpec]) -> str:
+    """Record the contested decomposition in the same ledger node-answers use, so
+    it surfaces in the Dissent view. Stage 5 = beyond the arbiter's 1–4: this is a
+    dissent against the *plan*, not against a competing proposal."""
+    async with tenant_conn() as c:
+        return await c.fetchval(
+            """INSERT INTO dissent (tenant_id, run_id, node_id, dissenter, winner,
+                   stage, reason, proposal, status)
+               VALUES (current_setting('app.tenant_id')::uuid,$1,$2,'decomposition','',5,$3,$4::jsonb,'dormant')
+               RETURNING id""",
+            run_id, node.id, "all proposals refuted — decomposition contested",
+            json.dumps({"reforge": [s.id for s in subs]}))
+
+
+async def _settle_plan_dissent(run_id, dissent_id: str, outcome: str, node_id: str, text: str) -> None:
+    async with tenant_conn() as c:
+        await c.execute("UPDATE dissent SET status=$2 WHERE id=$1", dissent_id, outcome)
+    await mem.append_episodic(run_id, "replan", {"node": node_id, "text": f"{outcome}: {text}"})
 
 
 # ── live state mutation on the shared agents rows ───────────────────────────
@@ -637,6 +891,53 @@ async def _persist_files(run_id, files: dict) -> None:
                    DO UPDATE SET content=EXCLUDED.content, ext=EXCLUDED.ext""",
                 run_id, folder, name, ext, content or "", ordinal, ordinal == 0)
             ordinal += 1
+
+
+def demo() -> None:
+    # §11 taint propagation, DB-free: an untrusted (lock) chunk a node consumes
+    # taints the node; a node that only pulls trusted source stays clean.
+    rid = "demo-taint"
+    _ws_ctx[rid] = {"chunks": [
+        {"label": "package-lock.json", "text": "deps", "vec": [1.0, 0.0]},
+        {"label": "src/app.py", "text": "code", "vec": [0.0, 1.0]},
+    ]}
+    ts = _seed_taint(_ws_ctx[rid])
+    assert ts.is_tainted("package-lock.json") and not ts.is_tainted("src/app.py")
+
+    _, used_lock = _relevant_workspace(rid, [1.0, 0.0], k=1)   # ranks the lockfile top
+    ts.derive("node.deps", used_lock)
+    assert ts.call_policy(["node.deps"]) == {"writes": False, "network": False, "tainted": True}
+
+    _, used_src = _relevant_workspace(rid, [0.0, 1.0], k=1)    # ranks the source top
+    ts.derive("node.impl", used_src)
+    assert ts.call_policy(["node.impl"])["writes"] is True     # clean node keeps writes
+    _ws_ctx.pop(rid, None)
+
+    # move 2: a behavioral single-agent node gets a refuter appended (cloned from
+    # the cheapest roster transport); a non-behavioral node and an already-
+    # consensus node are left untouched.
+    roster = {"dev": [
+        {"agent": "strong", "model": "claude-opus-4.6", "transport": "api", "key": None},
+        {"agent": "cheap", "model": "deepseek-v3.2", "transport": "api", "key": None}]}
+    one = [{"agent": "strong", "model": "claude-opus-4.6", "transport": "api"}]
+    beh = NodeSpec(id="n1", role="dev", intent="x", acceptance=["confidence.min", "tests.pass"])
+    non = NodeSpec(id="n2", role="dev", intent="x", acceptance=["confidence.min"])
+    withref = _with_refuter(one, roster, beh)
+    assert len(withref) == 2 and withref[-1]["agent"] == "refuter"
+    assert withref[-1]["adversarial"] and withref[-1]["model"] == "deepseek-v3.2"  # cheapest cloned
+    assert _with_refuter(one, roster, non) == one                 # non-behavioral: unchanged
+    assert _with_refuter(one + one, roster, beh) == one + one      # already consensus: unchanged
+    assert _dispatch_stance({"adversarial": True}) == _ADVERSARIAL and _dispatch_stance({}) == ""
+
+    # move 3: usage accumulates across repair rounds (spend stays honest), and the
+    # repair feedback carries both the failure and the attempt's own files back.
+    acc = _usage_sum(None, Completion("x", Usage(10, 5, 0, 0.02)))
+    acc = _usage_sum(acc, Completion("y", Usage(8, 4, 1, 0.01)))
+    assert (acc.input_tokens, acc.output_tokens, acc.usd) == (18, 9, 0.03)
+    fb = _repair_feedback("tests.pass rc=1: AssertionError", {"files": {"t.py": "bad"}})
+    assert "VERIFIER FAILED" in fb and "t.py" in fb and "AssertionError" in fb
+    assert repair_rounds() >= 0
+    print("orchestrator.demo ok")
 
 
 async def _fold_scores(domain) -> None:

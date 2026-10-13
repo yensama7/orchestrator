@@ -9,7 +9,11 @@ class Scale(BaseModel):
 
 class SpecFingerprint(BaseModel):
     """The highest-leverage human input (§3 step 2). Editable, not hidden
-    metadata."""
+    metadata. `extra=allow` so a free-thinking model can attach domain-specific
+    fields (e.g. `realtime`, `offline_first`) without them being silently
+    dropped — the shape is dynamic, only `domain` is normalised to a join key."""
+
+    model_config = {"extra": "allow"}
 
     domain: str
     subdomain: str = ""
